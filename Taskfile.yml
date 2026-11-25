@@ -694,7 +694,7 @@ tasks:
             [ "$t" = "$VERSION" ] || others=1
           done
           if [ "$others" = 0 ]; then
-            echo "gorelease: no tag yet but $VERSION, so no base to compare with; $VERSION's form is checked alone"
+            echo "gorelease: no tag yet, $VERSION's own aside, so no base to compare with; $VERSION's form is checked alone"
             {{.GORELEASE}} -base=none -version="$VERSION"
             exit
           fi
