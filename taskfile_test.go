@@ -425,7 +425,7 @@ func TestPrePushTakesTestsFromTheCacheAndReleaseRunsEveryOne(t *testing.T) {
 			caller := cmd.Args[len(cmd.Args)-2:]
 			isolate(cmd)
 			cmd.Env = append(cmd.Env, caller...)
-			out, err := cmd.CombinedOutput()
+			out, err := toolOutput(cmd)
 			if err != nil {
 				t.Fatalf("task --dry pre-push release, %q: %v:\n%s", caller, err, out)
 			}
@@ -516,7 +516,7 @@ func TestWarmBuildsAndRunsNothing(t *testing.T) {
 	}
 	cmd := toolTask(t.Context(), "--dry", "warm")
 	isolate(cmd)
-	out, err := cmd.CombinedOutput()
+	out, err := toolOutput(cmd)
 	if err != nil {
 		t.Fatalf("task --dry warm: %v:\n%s", err, out)
 	}
@@ -948,7 +948,7 @@ func TestEachTierEndsInItsBudget(t *testing.T) {
 	// run, so go tool costs less here than taskBin's build.
 	cmd := toolTask(t.Context(), "--summary", "pre-commit", "pre-push", "release")
 	isolate(cmd)
-	out, err := cmd.CombinedOutput()
+	out, err := toolOutput(cmd)
 	if err != nil {
 		t.Fatalf("task --summary pre-commit pre-push release: %v:\n%s", err, out)
 	}
@@ -1047,6 +1047,22 @@ func goTask(t *testing.T, bin string, args ...string) *exec.Cmd {
 // TestPrePushTakesTestsFromTheCacheAndReleaseRunsEveryOne read no line under CI's color.
 func toolTask(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "go", append([]string{"tool", "-modfile=tools/task.mod", "task", "--color=false"}, args...)...) //nolint:gosec // G204: the module's own go-task, from tools/task.mod, with the test's own arguments
+}
+
+// toolOutput runs cmd, a toolTask command, and is its combined output without the lines go tool
+// prints as it fetches go-task's modules into a cold module cache, before go-task starts, such as
+// "go: downloading cloud.google.com/go v0.123.0". None is go-task's, and a test that reads the
+// output line by line took one for its own: warm's read "go v0.123.0" as a go command, and the
+// tiers' summaries found text before the first. Any other line of go's, an error among them, stays.
+func toolOutput(cmd *exec.Cmd) ([]byte, error) {
+	out, err := cmd.CombinedOutput()
+	var kept []byte
+	for line := range bytes.Lines(out) {
+		if !bytes.HasPrefix(line, []byte("go: downloading ")) {
+			kept = append(kept, line...)
+		}
+	}
+	return kept, err
 }
 
 // TestTheSecondConsumerUsesEveryPackageAndRunsInPreCommit holds internal/second, a program
