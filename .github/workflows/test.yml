@@ -1,0 +1,42 @@
+# Runs go vet and go test on GitHub's hosted runners, on Linux, macOS and Windows, for every pull
+# request, every push to main, and by hand. It holds no secret, and its token reads the repository's
+# contents alone. Every module is fetched through the public Go module proxy, as a program that
+# imports go-socket fetches them, and nothing is kept in the Actions cache. go-socket is one module,
+# at the root; the modules under tools/ pin the developer tools and no program imports them.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      GOFLAGS: -mod=mod
+      GOPROXY: https://proxy.golang.org,direct
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
