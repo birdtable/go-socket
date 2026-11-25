@@ -1,0 +1,5 @@
+go test fuzz v1
+string("person@example.com")
+string("{\"example.com/cap/app\":[{\"role\":\"viewer\",\"role\":\"admin\"}]}")
+string("")
+byte('\x00')

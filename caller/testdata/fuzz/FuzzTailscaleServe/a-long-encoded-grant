@@ -1,0 +1,5 @@
+go test fuzz v1
+string("=?utf-8?q?zo=C3=AB@example.com?=")
+string("=?utf-8?q?{\"example.com/cap/app\":[{\"role\":\"zo=C3=AB\",\"note\":\"=C3=BCn?= =?utf-8?q?=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_?= =?utf-8?q?=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn?= =?utf-8?q?=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_?= =?utf-8?q?=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn=C3=AF_=C3=BCn?= =?utf-8?q?=C3=AF_=C3=BCn=C3=AF_\"}]}?=")
+string("")
+byte('\x00')

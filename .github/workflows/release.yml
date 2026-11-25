@@ -1,0 +1,331 @@
+# go-socket's release run: by hand only, never on a push, a tag or a pull
+# request. A release is usually checked and made on a maintainer's machine, and
+# this is kept for when no Linux or Windows machine is at hand. A library builds nothing, so
+# the run is the release tier of Taskfile.yml on the tag's tree, on Linux and on
+# Windows, each job held to 20 minutes: every check, the API report against the
+# last tag (gorelease) and the changelog entry for the version (changie). Only
+# when both are green is the release created, with that entry as its notes.
+#
+# ref, optional, is a commit to run the tiers at, by its full sha, so a fix is
+# proven before the tag it goes in. With it,
+# fetch and both tier jobs check out that commit, the tier runs with version as
+# its VERSION, and release does not run: such a run publishes nothing, and the
+# version's tag need not exist yet. Without it the tiers run at the tag, as
+# before.
+#
+# The tier reads three private modules: hatch and go-proc, which the hatch tool
+# needs (tools/hatch.mod), and go-socket itself at its earlier tags, which
+# gorelease compares against. So one job fetches the modules and hands them to
+# the tier jobs, which hold no token:
+#   - fetch holds a token of the org's read-only GitHub App, narrowed to hatch,
+#     go-proc, go-socket and go-testkit, which go.mod requires for the tests
+#     alone, and to Contents: read, made by
+#     create-github-app-token from the secrets BIRDTABLE_APP_ID and
+#     BIRDTABLE_APP_KEY. The token is in the one step that downloads, in that
+#     step's environment and in no file. It runs no code of the tree: go mod
+#     tidy, go mod download all for go.mod, go mod download for each
+#     tools/*.mod, and go mod download of go-socket at each tag below the
+#     version. Not the version itself: gorelease refuses a version the list
+#     already holds. For the highest of them, gorelease's base, it downloads
+#     all the base needs, and builds gorelease's own load module for it and
+#     runs go get there, as gorelease does: that module has no go line, so
+#     its graph is not pruned and needs go.mod files the base's own graph
+#     does not. It uploads the module download cache, and not the VCS cache,
+#     so nothing written under the token's name leaves the job. The private
+#     modules' source is kept only in that artifact, for one day.
+#   - tier-linux and tier-windows download that cache and read it as their only
+#     module proxy, GOPROXY=file://<cache> with GONOPROXY=none, and no secret,
+#     so the tree's code, its tests and its tools never see a token. Not
+#     GOPROXY=off, as go-console has: gorelease asks the proxy for go-socket's
+#     versions to find the last tag, and off refuses that ask. The file proxy
+#     answers it with the tags fetch downloaded and nothing else, and reaches
+#     no network. GONOPROXY=none, since GOPRIVATE alone sends birdtable's
+#     modules to git, past the proxy. Each tier's step "This job holds no
+#     token" proves it: no token variable is set, and git holds no credential
+#     header or URL rewrite. It probes no repository's reachability, which
+#     says nothing about a token once that repository is public.
+#
+# No job restores or saves setup-go's cache: in a tier it would save the moved
+# GOMODCACHE, the private modules' source, into the Actions cache for up to 7
+# days, and never hit. So the pinned tools
+# are compiled on every run.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The tag to check and release, as v0.1.1
+        required: true
+      ref:
+        description: "a commit to run the tiers at, by its full sha; nothing is published"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # The release tier pastes VERSION into its shell text, so nothing runs until
+  # the input is a tag such as v0.1.1: no other character, and one line.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The version is a tag such as v0.1.1
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          bad() { printf 'version is %s, and wants a tag such as v0.1.1\n' "$VERSION"; exit 1; }
+          case "$VERSION" in *[!v0-9.]*) bad ;; esac
+          printf '%s\n' "$VERSION" | grep -Eqx 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' || bad
+      # A ref that is not a full sha is refused before anything is checked out:
+      # a branch's name would run the tiers at whatever it holds when each job
+      # starts, and the three jobs could read three trees. The input reaches the
+      # script by its environment, never pasted into it. grep -x would test each
+      # line, so a sha, a newline and a branch's name would pass it:
+      # the case refuses any byte but a lower-case hex
+      # digit, a newline among them, and the length check the rest.
+      - name: ref is empty or a full sha
+        env:
+          REF: ${{ inputs.ref }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          bad() { echo "::error::ref must be empty or a commit's full sha, and is not, so no tier runs"; exit 1; }
+          case "$REF" in *[!0-9a-f]*) bad ;; esac
+          if [ -n "$REF" ] && [ "${#REF}" -ne 40 ]; then bad; fi
+          if [ -n "$REF" ]; then echo "the tiers run at $REF with VERSION $VERSION, and nothing is published"; fi
+
+  fetch:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.ref || format('refs/tags/{0}', inputs.version) }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      # app-id takes the App ID the secret holds; client-id, which replaces it,
+      # takes the Client ID.
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.BIRDTABLE_APP_ID }}
+          private-key: ${{ secrets.BIRDTABLE_APP_KEY }}
+          owner: birdtable
+          repositories: hatch,go-proc,go-socket,go-testkit
+          permission-contents: read
+      # git reads its URL rewrite from this step's environment alone: nothing is
+      # written to a git config file, and go's VCS cache is not uploaded. go
+      # refuses a version of the main module asked for inside it, so go-socket's
+      # tags are downloaded from the runner's temp folder, which holds no go.mod.
+      # load is gorelease's load module for the base (prepareLoadDir, called
+      # with no go.mod of the base's): a require of the base alone, the base's
+      # go.sum, and a file importing each of its packages but internal ones.
+      - name: Download the modules, the tools' and gorelease's too
+        env:
+          TOKEN: ${{ steps.app.outputs.token }}
+          GOPRIVATE: github.com/birdtable/*
+          GIT_TERMINAL_PROMPT: "0"
+          VERSION: ${{ inputs.version }}
+        run: |
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="url.https://x-access-token:${TOKEN}@github.com/.insteadOf"
+          export GIT_CONFIG_VALUE_0="https://github.com/"
+          go mod tidy
+          go mod download all
+          for m in tools/*.mod; do go mod download -modfile="$m"; done
+          below="$(git tag -l 'v*' \
+            | grep -Ex 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' \
+            | grep -vx "$VERSION" | { cat; printf '%s\n' "$VERSION"; } \
+            | sort -V | awk -v v="$VERSION" '$0 == v { exit } { print }')"
+          base=""
+          for t in $below; do
+            go -C "$RUNNER_TEMP" mod download "github.com/birdtable/go-socket@$t"
+            base="$t"
+          done
+          if [ -n "$base" ]; then
+            cp -R "$(go env GOMODCACHE)/github.com/birdtable/go-socket@$base" "$RUNNER_TEMP/base"
+            chmod -R u+w "$RUNNER_TEMP/base"
+            go -C "$RUNNER_TEMP/base" mod download all
+            load="$RUNNER_TEMP/load"
+            mkdir "$load"
+            printf 'module gorelease-load-module\n\nrequire github.com/birdtable/go-socket %s\n' "$base" > "$load/go.mod"
+            if [ -f "$RUNNER_TEMP/base/go.sum" ]; then cp "$RUNNER_TEMP/base/go.sum" "$load/go.sum"; fi
+            {
+              echo 'package tmp'
+              go -C "$RUNNER_TEMP/base" list -e -f '{{if not .Error}}{{.ImportPath}}{{end}}' ./... \
+                | grep -Ev '/internal(/|$)' | sed 's/.*/import _ "&"/'
+            } > "$load/tmp.go"
+            go -C "$load" get .
+            go -C "$load" mod download all
+          fi
+          # go get's retraction and deprecation checks read go-socket's latest
+          # version (queryLatestVersionIgnoringRetractions), which at a release
+          # is the version's own tag, pushed first, and the cache's version
+          # list then holds it: gorelease, which reads that list through the
+          # file proxy, refuses the version as one that already exists, as a
+          # run by hand showed. So the cache keeps go-socket at the tags below
+          # the version alone, its list rewritten to name those.
+          v="$(go env GOMODCACHE)/cache/download/github.com/birdtable/go-socket/@v"
+          if [ -d "$v" ]; then
+            for f in "$v"/*; do
+              n="${f##*/}"
+              keep=""
+              for t in $below list.lock; do
+                case "$n" in "$t" | "$t".*) keep=1 ;; esac
+              done
+              if [ -z "$keep" ]; then rm -f "$f"; fi
+            done
+            for t in $below; do echo "$t"; done > "$v/list"
+          fi
+          echo "go-socket at ${below//$'\n'/ }, and gorelease's base ${base:-none}"
+      - id: cache
+        run: echo "dir=$(go env GOMODCACHE)/cache/download" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gomod
+          path: ${{ steps.cache.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 1
+
+  tier-linux:
+    needs: fetch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.ref || format('refs/tags/{0}', inputs.version) }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gomod
+          path: ${{ runner.temp }}/gomod/cache/download
+      - name: The modules come from the fetch job
+        shell: bash
+        run: |
+          {
+            echo "GOMODCACHE=${RUNNER_TEMP}/gomod"
+            echo "GOPROXY=file://${RUNNER_TEMP}/gomod/cache/download"
+            echo "GONOPROXY=none"
+            echo "GOPRIVATE=github.com/birdtable/*"
+          } >> "$GITHUB_ENV"
+      - name: This job holds no token
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+          GCM_INTERACTIVE: never
+        run: |
+          refuse() { echo "::error::$1, so this job holds a token"; exit 1; }
+          if [ -n "${GH_TOKEN-}${GITHUB_TOKEN-}${TOKEN-}" ]; then refuse "GH_TOKEN, GITHUB_TOKEN or TOKEN is set"; fi
+          if git config --get-regexp '^(http\..*\.extraheader|url\..*\.insteadof)$' > /dev/null; then refuse "git has a credential header or a URL rewrite"; fi
+          echo "no token variable is set, and git holds no credential header or URL rewrite"
+      # The untimed step before a tier: warm builds what release builds, the
+      # tools among it, and runs no test. On this runner's cold cache the members
+      # would build their own tools inside their 2-minute timeouts, and lint on
+      # Linux and changelog on Windows run out of time doing so.
+      - name: Warm the build cache, running no test
+        run: go tool -modfile=tools/task.mod task warm
+      - name: The release tier
+        env:
+          VERSION: ${{ inputs.version }}
+        run: go tool -modfile=tools/task.mod task release VERSION="$VERSION"
+
+  # The same tier and the README's task line, on Windows, under Git's bash. A
+  # file URL there takes the drive's path with forward slashes, file:///D:/...
+  tier-windows:
+    needs: fetch
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.ref || format('refs/tags/{0}', inputs.version) }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gomod
+          path: ${{ runner.temp }}/gomod/cache/download
+      - name: The modules come from the fetch job
+        shell: bash
+        run: |
+          {
+            echo "GOMODCACHE=${RUNNER_TEMP}/gomod"
+            echo "GOPROXY=file:///$(cygpath -m "$RUNNER_TEMP")/gomod/cache/download"
+            echo "GONOPROXY=none"
+            echo "GOPRIVATE=github.com/birdtable/*"
+          } >> "$GITHUB_ENV"
+      - name: This job holds no token
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+          GCM_INTERACTIVE: never
+        run: |
+          refuse() { echo "::error::$1, so this job holds a token"; exit 1; }
+          if [ -n "${GH_TOKEN-}${GITHUB_TOKEN-}${TOKEN-}" ]; then refuse "GH_TOKEN, GITHUB_TOKEN or TOKEN is set"; fi
+          if git config --get-regexp '^(http\..*\.extraheader|url\..*\.insteadof)$' > /dev/null; then refuse "git has a credential header or a URL rewrite"; fi
+          echo "no token variable is set, and git holds no credential header or URL rewrite"
+      # The untimed step before a tier: warm builds what release builds, the
+      # tools among it, and runs no test. On this runner's cold cache the members
+      # would build their own tools inside their 2-minute timeouts, and lint on
+      # Linux and changelog on Windows run out of time doing so.
+      - name: Warm the build cache, running no test
+        shell: bash
+        run: go tool -modfile=tools/task.mod task warm
+      - name: The release tier
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: go tool -modfile=tools/task.mod task release VERSION="$VERSION"
+
+  # The only job that writes: it needs both tiers, one red or cancelled and
+  # nothing is created, and --verify-tag creates nothing for a name that is not
+  # a tag. The notes are the version's section, .changes/<version>.md, as the
+  # tag's tree holds it: it is batched on main before the tag, so a
+  # dry-run batch at the tag would find no entry, and is never the notes. gh
+  # reads the notes through any link, and its environment holds GH_TOKEN, so a
+  # section that is a link, or is reached through a linked folder, would publish
+  # what it points at. Nothing is created unless the section is a
+  # regular file at its own path in the tag's tree, with a changie item line.
+  #
+  # A run at ref publishes nothing: this job does not run.
+  release:
+    needs: [tier-linux, tier-windows]
+    if: inputs.ref == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: refs/tags/${{ inputs.version }}
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          notes=".changes/$VERSION.md"
+          refuse() { echo "$notes $1, so nothing is published"; exit 1; }
+          if [ -L "$notes" ]; then refuse "is a link"; fi
+          if [ ! -f "$notes" ]; then refuse "is missing or not a regular file"; fi
+          if [ "$(realpath "$notes")" != "$(pwd -P)/$notes" ]; then refuse "is reached through a linked folder"; fi
+          if ! grep -q '^[*-] ' "$notes"; then refuse "holds no changie item line"; fi
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$VERSION" --notes-file "$notes"

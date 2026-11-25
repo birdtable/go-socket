@@ -1,0 +1,697 @@
+# go-socket's checks, in three tiers: pre-commit, pre-push and release.
+#
+# Every tool is pinned in a modfile of its own under tools/ and run with
+# `go tool -modfile=tools/<tool>.mod <tool>`, so nothing is installed first,
+# no tool's dependencies reach the library's go.mod, and no two tools share a
+# graph. Run a tier with `go tool -modfile=tools/task.mod task <tier>`.
+#
+# CGO_ENABLED is set on each command that cares, never left to the caller's
+# environment, which a task's env: does not override: 0 for build, vet and lint,
+# so a cross-system run needs no C compiler, and 1 for the race tests, which
+# need it.
+#
+# A tier is a task whose members run together (deps:), each command of a member
+# with a timeout:, so a member that hangs fails by its name. A member waits only
+# for one it needs; none of these needs another, so none waits. pre-commit
+# builds and vets for this system, and runs the second consumer's tests
+# (second); pre-push has systems instead, which builds and vets for the four,
+# and test, whose ./... holds the second consumer too.
+#
+# A member that reads only the tree skips when its inputs are what they were at
+# its last pass: fmt, tidy, build, vet, systems, lint, and vuln and
+# licenses, which pre-push runs only when the module graph's files change
+# (what that leaves to release is said at vuln).
+# Each names its inputs in sources:, the Taskfile among them, so a changed line
+# of its own reruns it. go-task writes a member's checksum before the member
+# runs and removes it only when a command fails, so a run killed mid-member
+# (SIGKILL, a closed session) leaves the checksum of a member that never passed.
+# So each such member also names a stamp, .task/pass/<member>, in generates::
+# its first command removes the stamp, its last writes it, and a member whose
+# stamp is missing runs, whatever the checksum says. The members that read more
+# than the tree never skip: test and test-release (though test's go test takes a
+# package's pass from Go's cache), second, secrets, verify (the module cache),
+# api and gorelease (the last tag), changelog and size. release removes every stamp
+# first, so nothing in it skips, vuln among them, whose database moves.
+#
+# Each tier holds its time to its budget in gate/budgets.yaml with hatch
+# budget, its last step: budget says how. The
+# tests are judged by hatch tests, and a test that fails or skips, or a run with
+# no test, is red.
+version: '3'
+
+vars:
+  # Every system the module builds for with cgo off, each as GOOS/GOARCH: amd64
+  # where it builds there, or else the port it builds on. lint reads each one,
+  # its typecheck and govet failing where go build and go vet would, so no file
+  # tagged for one of them escapes. TestLintReadsEverySystemTheModuleBuildsFor
+  # fails when a system out of this list builds, and TestNoFileLintCannotRead
+  # when a file names one, or when no entry here, at its arch with cgo and race
+  # off, reads a file (one for darwin/arm64, say).
+  SYSTEMS: aix/ppc64 android/arm64 darwin/amd64 dragonfly/amd64 freebsd/amd64 illumos/amd64 linux/amd64 netbsd/amd64 openbsd/amd64 solaris/amd64 windows/amd64
+  # The systems systems builds and vets on their own, on the host's GOARCH.
+  BUILT: linux darwin windows freebsd
+  LINT: go tool -modfile=tools/golangci-lint.mod golangci-lint
+  LINT_BUILT: go tool -modfile=tools/golangci-lint.mod -n golangci-lint
+  GITLEAKS: go tool -modfile=tools/gitleaks.mod gitleaks
+  HATCH: go tool -modfile=tools/hatch.mod hatch
+  GOVULNCHECK: go tool -modfile=tools/govulncheck.mod govulncheck
+  GOLICENSES: go tool -modfile=tools/go-licenses.mod go-licenses
+  CHANGIE: go tool -modfile=tools/changie.mod changie
+  GORELEASE: go tool -modfile=tools/gorelease.mod gorelease
+  APIDIFF_BUILT: go tool -modfile=tools/apidiff.mod -n apidiff
+  # The systems api reads the surface on, darwin first: the others are held to it.
+  API_SYSTEMS: darwin linux windows
+
+tasks:
+  hooks:
+    desc: Install the pre-push hook into this clone.
+    cmds:
+      - cp hooks/pre-push "$(git rev-parse --git-path hooks)/pre-push"
+      - chmod +x "$(git rev-parse --git-path hooks)/pre-push"
+
+  # Each tier reads the second it starts, and pre-commit and pre-push the 1-minute load
+  # before it, in vars of its own, and hands them to budget, its last step; release, which
+  # no load forgives, reads none and passes an empty one.
+  pre-commit:
+    desc: The quick tier, on this system, its members run together, then held to its budget.
+    vars:
+      LOAD: {sh: '{{.HATCH}} budget --load --window 1 2>/dev/null || true'}
+      START: '{{now.Unix}}'
+    cmds:
+      - task: pre-commit-members
+      - task: budget
+        vars: {TIER: pre-commit, START: '{{.START}}', LOAD: '{{.LOAD}}'}
+
+  pre-commit-members:
+    internal: true
+    deps: [fmt, tidy, build, vet, second, contract, secrets]
+
+  pre-push:
+    desc: The tier the pre-push hook runs, its members run together, then held to its budget.
+    vars:
+      LOAD: {sh: '{{.HATCH}} budget --load --window 1 2>/dev/null || true'}
+      START: '{{now.Unix}}'
+    cmds:
+      - task: pre-push-members
+      - task: budget
+        vars: {TIER: pre-push, START: '{{.START}}', LOAD: '{{.LOAD}}'}
+
+  pre-push-members:
+    internal: true
+    deps: [fmt, tidy, secrets, systems, test, lint, api, vuln, licenses]
+
+  release:
+    desc: "The tier a release runs, VERSION its tag (as v0.1.0): every member, none skipped, the module graph verified, the API against the last tag, the notes and the count."
+    requires:
+      vars: [VERSION]
+    vars:
+      START: '{{now.Unix}}'
+    cmds:
+      - task: version
+        vars:
+          VERSION: '{{.VERSION}}'
+      - cmd: rm -rf .task/pass
+      - task: release-members
+        vars:
+          VERSION: '{{.VERSION}}'
+      - task: budget
+        vars: {TIER: release, START: '{{.START}}', LOAD: ''}
+
+  release-members:
+    internal: true
+    deps:
+      - fmt
+      - tidy
+      - secrets
+      - systems
+      - test-release
+      - release-tests
+      - lint
+      - api
+      - vuln
+      - licenses
+      - verify
+      - task: gorelease
+        vars:
+          VERSION: '{{.VERSION}}'
+      - task: changelog
+        vars:
+          VERSION: '{{.VERSION}}'
+      - size
+
+  # warm is the untimed step before a timed release run: it fills the Go cache with
+  # what release builds, and runs no test and no tier. go list -export compiles each
+  # package with its tests and their deps for every system lint reads, and links
+  # nothing. Go caches vet's facts and verdicts, the dependencies' and the module's
+  # alike, under the analyzers each command runs: so
+  # warm runs go vet for each system systems vets, and go test -c for the race tests,
+  # which builds and vets each test binary into .task/warm and runs none. go tool -n
+  # builds a tool and prints where. warm has no budget and no tier calls it: run it,
+  # then the one timed task release.
+  warm:
+    desc: "Build what release builds, and run no test: the packages and their tests for every system, what the systems test compiles for each port SYSTEMS leaves out, go vet for the four, the race test binaries (built and vetted, not run), the tests' go-task, and each tool. Not timed; no tier calls it."
+    cmds:
+      - for: {var: SYSTEMS}
+        cmd: CGO_ENABLED=0 GOOS={{dir .ITEM}} GOARCH={{base .ITEM}} go list -export -test -deps ./... > /dev/null
+        timeout: 10m
+      # TestLintReadsEverySystemTheModuleBuildsFor builds ./... for each port of every GOOS
+      # SYSTEMS leaves out, and wants it to fail: the module's packages fail, and the std
+      # packages under them compile. On a cold cache that was about 50 s of CPU in release's
+      # first run, five ports at about 10 s each, slowing every test beside them.
+      # -e records the module's own errors and builds the rest, so this exits 0 there.
+      - cmd: |
+          go tool dist list | while IFS=/ read -r goos goarch; do
+            case " {{.SYSTEMS}} " in *" $goos/"*) continue ;; esac
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go list -e -export -deps ./... > /dev/null || exit 1
+          done
+        timeout: 10m
+      - for: {var: BUILT}
+        cmd: CGO_ENABLED=0 GOOS={{.ITEM}} go vet ./...
+        timeout: 10m
+      - cmd: rm -rf .task/warm
+        timeout: 1m
+      - cmd: CGO_ENABLED=1 go test -race -c -o .task/warm/ ./...
+        timeout: 10m
+      # The root package's tests build go-task with go install (taskBin), whose link Go
+      # caches apart from go tool's build of the same tool: the same install, with cgo
+      # on as test runs it.
+      - cmd: CGO_ENABLED=1 GOBIN='{{.ROOT_DIR}}/.task/warm' go install -modfile=tools/task.mod github.com/go-task/task/v3/cmd/task
+        timeout: 10m
+      - cmd: rm -rf .task/warm
+        timeout: 1m
+      - cmd: |
+          for mod in tools/*.mod; do
+            tool=$(basename "$mod" .mod)
+            go tool -modfile="$mod" -n "$tool" > /dev/null || exit 1
+          done
+        timeout: 10m
+
+  # budget holds a tier to its budget in gate/budgets.yaml with hatch budget.
+  # hatch holds no policy, so each value is named here: the row's shape,
+  # which row a kind of host takes, the load that forgives an overrun and the words.
+  # A pre-commit or pre-push past its budget passes when the 1-minute load read
+  # before it was above 15, saying so, and fails at 15 or
+  # below or with no load read; a release past its budget fails. The
+  # tier reads that load (hatch budget --load, none on Windows) and then its start
+  # in vars of its own, and passes both and its name here as the call's vars: so two
+  # runs of one tier share no file, and a var of the caller's environment or command
+  # line (START=0 or LOAD=16 before a git push, TIER=pre-push after release) sets
+  # none of them, as go-task takes a task's own var and a call's over both.
+  #
+  # pre-push has no relief of its own: its budget is 10 s, and
+  # an overrun passes only at a load above 15. A warm push over 10 s is a speed bug.
+  budget:
+    internal: true
+    silent: true
+    desc: Hold TIER's seconds since START to its budget in gate/budgets.yaml, with hatch budget.
+    cmds:
+      - cmd: |
+          tier={{shellQuote .TIER}}
+          start={{shellQuote .START}}
+          load={{shellQuote .LOAD}}
+          case "$tier" in pre-commit|pre-push|release) ;; *) echo "budget: TIER is '$tier', and wants pre-commit, pre-push or release" >&2; exit 1 ;; esac
+          here='{{OS}}-{{ARCH}}'
+          if grep -Eq "^host: $here[[:space:]]*\$" gate/budgets.yaml; then
+            row="$tier-budget"
+          elif [ "$tier" = release ] && [ -z "${GITHUB_ACTIONS:-}" ] && { [ "$here" = linux-amd64 ] || [ "$here" = windows-amd64 ]; }; then
+            row=release-budget-session
+          else
+            echo "$tier took $(( {{now.Unix}} - start )) s; no budget for this kind of host ($here), so none applies"
+            exit 0
+          fi
+          set -- --budgets gate/budgets.yaml --row '^(?P<id>[a-z-]+): *(?P<limit>[0-9]+) *$' --tier "$row" --since "$start"
+          case "$tier" in
+            pre-commit|pre-push)
+              set -- "$@" --window 1 --limit 15 --loaded-when before --noun "the $tier" --excused "the load forgives it"
+              if [ -n "$load" ]; then set -- "$@" --load-before "$load"; fi ;;
+          esac
+          {{.HATCH}} budget "$@" --advice "gate/budgets.yaml has the tier's floor beside its budget"
+        timeout: 1m
+
+  fmt:
+    desc: gofmt changes nothing.
+    sources: ['**/*.go', Taskfile.yml]
+    generates: [.task/pass/fmt]
+    cmds:
+      - rm -f .task/pass/fmt
+      - cmd: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt would change these files:"
+            echo "$out"
+            exit 1
+          fi
+        timeout: 1m
+      - mkdir -p .task/pass && touch .task/pass/fmt
+
+  tidy:
+    desc: go.mod and go.sum are tidy.
+    sources: ['**/*.go', go.mod, go.sum, Taskfile.yml]
+    generates: [.task/pass/tidy]
+    cmds:
+      - rm -f .task/pass/tidy
+      - cmd: go mod tidy -diff
+        timeout: 2m
+      - mkdir -p .task/pass && touch .task/pass/tidy
+
+  build:
+    desc: go build, on this system.
+    sources: ['**/*.go', go.mod, go.sum, Taskfile.yml]
+    generates: [.task/pass/build]
+    cmds:
+      - rm -f .task/pass/build
+      - cmd: CGO_ENABLED=0 go build ./...
+        timeout: 5m
+      - mkdir -p .task/pass && touch .task/pass/build
+
+  vet:
+    desc: go vet, tests included, on this system.
+    sources: ['**/*.go', go.mod, go.sum, Taskfile.yml]
+    generates: [.task/pass/vet]
+    cmds:
+      - rm -f .task/pass/vet
+      - cmd: CGO_ENABLED=0 go vet ./...
+        timeout: 5m
+      - mkdir -p .task/pass && touch .task/pass/vet
+
+  second:
+    desc: "The second consumer's tests, on this system: a program on values unlike ours, through every exported package."
+    cmds:
+      # It listens and dials, as test does, so it never skips. No -race: the
+      # tier is the quick one, and test runs these with -race in pre-push.
+      - cmd: CGO_ENABLED=0 go test -count=1 -timeout=50s ./internal/second/
+        timeout: 1m
+
+  contract:
+    desc: "api/contract.txt holds its lines: each names a test built and never skipped on the systems it names, the file is sorted, and a line removed since the last tag is in its break file."
+    sources: ['**/*_test.go', 'internal/contract/*.go', 'api/**', go.mod, Taskfile.yml]
+    generates: [.task/pass/contract]
+    cmds:
+      - rm -f .task/pass/contract
+      # It reads source and git alone, and never skips: where no tag is
+      # reachable, or the tag holds no index, it says so and checks the rest.
+      - cmd: CGO_ENABLED=0 go test -count=1 -timeout=50s ./internal/contract/
+        timeout: 1m
+      - mkdir -p .task/pass && touch .task/pass/contract
+
+  systems:
+    desc: Build and vet for the four systems the library is held to.
+    sources: ['**/*.go', go.mod, go.sum, Taskfile.yml]
+    generates: [.task/pass/systems]
+    cmds:
+      - rm -f .task/pass/systems
+      - for: {var: BUILT}
+        cmd: CGO_ENABLED=0 GOOS={{.ITEM}} go build ./...
+        timeout: 5m
+      - for: {var: BUILT}
+        cmd: CGO_ENABLED=0 GOOS={{.ITEM}} go vet ./...
+        timeout: 5m
+      - mkdir -p .task/pass && touch .task/pass/systems
+
+  test:
+    desc: "The race tests, on this system, through Go's test cache: a package whose inputs did not change is not run again, judged by hatch tests. Not the one release runs alone (release-tests), nor the one over 1 s that guards no fail-open, which release's test-release runs. On Windows, and in test-release, each test binary starts through internal/cmd/testexec, which go test caches nothing behind."
+    # TIER picks the script's flags and skip. It is the task's own var, which
+    # go-task takes over a variable of the caller's environment and over one on
+    # the command line alike; {{.TASK}} is not, as `task release TASK=test`
+    # sets it. The script refuses any TIER but the two.
+    vars:
+      TIER: pre-push
+    cmds:
+      # pre-push's run and release's are one script, test-release's an alias of
+      # this one, so the two are judged alike and keep what a failure leaves alike.
+      # The flags and the skip are the tier's, from TIER above. test has neither
+      # -count=1 nor -shuffle, either of which stops Go caching a package's pass;
+      # test-release has both, so release runs every test again, in
+      # shuffled order, as pre-push did before. A package taken from the cache
+      # replays its tests' events in go test -json, so hatch counts them as run.
+      #
+      # Both skip the test over 2 s that checks release's own input, which runs in
+      # release alone (release-tests). test also skips the one test
+      # over 1 s that guards no fail-open: TestWarmBuildsAndRunsNothing.
+      # A second was once skipped too, the failed member's kept output, which is now
+      # TestATestMemberIsJudgedByHatchTests: it holds that a skip or a run with no
+      # test is red, a fail-open guard, so pre-push runs it. The skip is named here,
+      # not made by -short in the test, as a t.Skip would want a row of its own in
+      # .golangci.yml's skip list, which only shrinks. A test
+      # the skip pattern names is not run, so it is no skip to hatch's any-skipped.
+      # Each name is held to its function's own by
+      # TestPrePushTakesTestsFromTheCacheAndReleaseRunsEveryOne, and release-tests'
+      # by TestTheReleaseTestIsSkippedInPrePushAndRunInRelease.
+      #
+      # go test's own -timeout is under hatch's, and hatch's under the member's, so a
+      # test that hangs is reported by go test, with every goroutine's stack, before
+      # hatch or task kills the run. hatch tests runs go test -json and is red on a
+      # failed test, a skipped one, named in its line, or a run with no test.
+      #
+      # hatch's stdout (go test's json on a red, and its verdict line last) and its
+      # stderr go beside the tree, in the git-ignored build/, named by task's pid and
+      # the time, so two runs never share a file (on Windows, mktemp in task's shell names a path under /tmp that
+      # nothing can open). A green prints both and removes them; a red prints the
+      # stderr, the failed tests' lines and the verdict, keeps both and names them with
+      # hatch's exit, so a tier that fails with no test line still leaves what go test
+      # said.
+      #
+      # Where it runs, go test starts each test binary through internal/cmd/testexec, built
+      # beside them and removed after the run (a removal that leaves it, as on one Windows run,
+      # says so), which adds to $run.exits a line as each binary starts and one as it ends, with
+      # its exit code in full and its last line of output. The file is kept with
+      # the json, so a binary ended from outside is told from one that failed even when hatch
+      # and its json are cut off. hatch passes go test its own arguments after -race, -exec
+      # among them, and its environment. It runs in test-release, and in test on Windows, where
+      # two of ten pre-push tiers failed with no test line. go test's -exec costs the cache:
+      # with it, go test passes the binary no -test.testlogfile and caches no pass (cmd/go's
+      # test.go), so test on any other system runs without it, and keeps Go's test cache.
+      #
+      # race is the race detector's option the tier adds to GORACE, after the caller's own.
+      # A race test binary that exits 0 waits atexit_sleep_ms first, a second unless set, so a
+      # goroutine still running may report a race. That second is on every package's time, and
+      # listen's package is the member's longest path. pre-push takes it out,
+      # as the root package's hatch rows do; listen's TestMain ends in testkit.NoLeaks, which waits
+      # until every goroutine is blocked before the binary exits. release keeps it: its
+      # test-release runs every test again with the pause, so a race only the pause shows is
+      # still red before a tag. A binary that found a race exits 66 in both.
+      - cmd: &test-run |
+          {{if eq .TIER "release"}}flags='-count=1 -shuffle=on'; skip='^TestTheVersionCheckRefusesAnythingButOneTag$'; race=''{{else if eq .TIER "pre-push"}}flags=''; skip='^(TestTheVersionCheckRefusesAnythingButOneTag|TestWarmBuildsAndRunsNothing)$'; race='atexit_sleep_ms=0'{{else}}echo "test: TIER is '{{.TIER}}', and wants pre-push or release" >&2; exit 1{{end}}
+          if [ -n "$race" ]; then GORACE="${GORACE:+$GORACE }$race"; export GORACE; fi
+          {{if or (eq .TIER "release") (eq OS "windows")}}through=testexec{{else}}through=''{{end}}
+          mkdir -p "{{toSlash .ROOT_DIR}}/build"
+          run="{{toSlash .ROOT_DIR}}/build/test-$$-{{now | date "20060102T150405.000000000"}}"
+          code=0
+          exits=''
+          set --
+          if [ -n "$through" ]; then
+            CGO_ENABLED=0 go build -o "$run.testexec{{exeExt}}" ./internal/cmd/testexec
+            set -- -exec "'$run.testexec{{exeExt}}'"
+            exits=", each test binary's start and end in $run.exits"
+          fi
+          CGO_ENABLED=1 GO_SOCKET_TEST_EXITS="$run.exits" {{.HATCH}} tests --timeout 9m30s --red-when failed,none-ran,any-skipped --green-word green --red-word red -race "$@" $flags -timeout=9m -skip "$skip" ./... >"$run.out" 2>"$run.err" || code=$?
+          if [ -n "$through" ]; then
+            rm -f "$run.testexec{{exeExt}}"
+            if [ -e "$run.testexec{{exeExt}}" ]; then echo "test: $run.testexec{{exeExt}} is still there after rm -f; on Windows something may hold it open" >&2; fi
+          fi
+          cat "$run.err"
+          if [ "$code" -ne 0 ]; then
+            grep '"Action":"fail"' "$run.out" || true
+            tail -n 1 "$run.out"
+            if [ -s "$run.out" ]; then out="kept"; else out="empty"; fi
+            echo "test: hatch tests exited $code; go test's json and the verdict are $out in $run.out, the stderr in $run.err$exits"
+            exit "$code"
+          fi
+          cat "$run.out"
+          rm -f "$run.out" "$run.err" "$run.exits"
+        timeout: 10m
+
+  test-release:
+    internal: true
+    desc: "test as release runs it: every race test but release-tests' one, each run again (-count=1), in shuffled order."
+    vars:
+      TIER: release
+    cmds:
+      - cmd: *test-run
+        timeout: 10m
+
+  release-tests:
+    internal: true
+    desc: The race test that pre-push leaves to release, alone, judged by hatch tests.
+    cmds:
+      - cmd: CGO_ENABLED=1 {{.HATCH}} tests --timeout 9m30s --red-when failed,none-ran,any-skipped --green-word green --red-word red -race -count=1 -timeout=9m -run '^TestTheVersionCheckRefusesAnythingButOneTag$' .
+        timeout: 10m
+
+  lint:
+    desc: golangci-lint with .golangci.yml, for every system, the four run together.
+    sources: ['**/*.go', go.mod, go.sum, .golangci.yml, tools/golangci-lint.mod, tools/golangci-lint.sum, Taskfile.yml]
+    generates: [.task/pass/lint]
+    cmds:
+      - rm -f .task/pass/lint
+      - cmd: '{{.LINT}} config verify'
+        timeout: 2m
+      # go tool -n builds the linter for this system and prints where it is;
+      # GOOS and GOARCH then reach only the runs, each of which lints the files
+      # of its system. --allow-parallel-runners lets the runs, and another
+      # clone's, share the linter's cache instead of refusing.
+      - cmd: |
+          bin="$({{.LINT_BUILT}})" || exit 1
+          pids=""
+          for sys in {{.SYSTEMS}}; do
+            CGO_ENABLED=0 GOOS="${sys%/*}" GOARCH="${sys#*/}" "$bin" run --allow-parallel-runners ./... &
+            pids="$pids $!"
+          done
+          bad=0
+          for p in $pids; do wait "$p" || bad=1; done
+          exit $bad
+        timeout: 10m
+      - mkdir -p .task/pass && touch .task/pass/lint
+
+  # api holds the exported surface three ways, with
+  # apidiff (tools/apidiff.mod) for darwin, linux and windows, from export data it writes
+  # for each, cgo off, on the host's GOARCH:
+  #
+  # - Against the last tag, the one git describe finds from HEAD: that tag's tree is read
+  #   out of the repository through an index of the check's own, never a checkout and
+  #   never the network, and apidiff's incompatible lines for the three, joined and sorted,
+  #   must be api/breaks/<tag>.txt byte for byte, or nothing where there is no such file.
+  #   An undeclared break is red, and so is a declared line that no longer happens; after
+  #   the next tag the same tree is green with nothing edited. A repository with no tag
+  #   says so and skips this part alone; a shallow clone, which may only seem to have
+  #   none, is red.
+  # - Between the systems: apidiff's whole report of darwin's surface against linux's and
+  #   windows', each line led by the system and a tab, must be api/systems.txt less its #
+  #   lines (none else: the three are one surface), so a name, or a signature, one system
+  #   alone has is red on any host. The
+  #   whole report, as an added name is "compatible". Windows as the old side would print
+  #   one line, that the unexported listen.listen is comparable there and not on Unix: it
+  #   is reached only as ListenOption's *listen, which no caller can name or compare.
+  # - The marks: api/marks.txt names each name that is not experimental, as
+  #   <package><tab><name><tab><mark>, and go doc must find each. The three files are named
+  #   alike in the other birdtable libraries.
+  #
+  # A system whose tree apidiff cannot read is red by itself, never an empty report. It
+  # reads the tags as well as the tree, so it never skips; the whole of it is about 1 s,
+  # the systems read one after another.
+  api:
+    silent: true
+    desc: "The API: apidiff for darwin, linux and windows against the last tag, red on a break api/breaks/<tag>.txt does not hold; darwin's surface against linux's and windows', red on a difference api/systems.txt does not hold; and each name api/marks.txt marks, found by go doc."
+    cmds:
+      - cmd: |
+          bin="$({{.APIDIFF_BUILT}})" || exit 1
+          # Not mktemp: on Windows it names a path under /tmp that nothing can open. And
+          # no >> anywhere: there go-task's interpreter cannot append an external
+          # program's output to a file ("Bad file descriptor"),
+          # so each program writes a file of its own with > and the files are joined after.
+          d="${TMPDIR:-${TEMP:-/tmp}}/go-socket-api-$$"
+          mkdir "$d" || exit 1
+          done_() { rm -rf "$d"; exit "$1"; }
+          # read_ SIDE DIR: the export data of the module at DIR for each system, to
+          # $d/SIDE-<system>.exp; red, saying why, for each system where one fails.
+          # Its flag is unread, not bad: a shell function shares the caller's variables.
+          read_() {
+            side="$1"; dir="$2"; unread=0
+            for sys in {{.API_SYSTEMS}}; do
+              (cd "$dir" && GOWORK=off GOOS="$sys" CGO_ENABLED=0 "$bin" -m -w "$d/$side-$sys.exp" . 2>"$d/$side-$sys.err") && continue
+              echo "api: apidiff could not read the $side's tree for $sys:" >&2
+              cat "$d/$side-$sys.err" >&2
+              unread=1
+            done
+            return $unread
+          }
+          read_ head . || done_ 1
+          bad=0
+          # The systems.
+          set --
+          for sys in {{.API_SYSTEMS}}; do
+            [ "$sys" = darwin ] && continue
+            "$bin" -m "$d/head-darwin.exp" "$d/head-$sys.exp" > "$d/systems-$sys.out" 2>"$d/systems-$sys.err" || {
+              echo "api: apidiff could not compare darwin with $sys:" >&2; cat "$d/systems-$sys.err" >&2; done_ 1; }
+            while IFS= read -r line; do
+              printf '%s\t%s\n' "$sys" "$line"
+            done < "$d/systems-$sys.out" > "$d/systems-$sys.tab"
+            set -- "$@" "$d/systems-$sys.tab"
+          done
+          cat "$@" > "$d/systems.txt" || done_ 1
+          if [ ! -f api/systems.txt ]; then
+            echo "api: api/systems.txt is missing; it holds the differences between darwin's surface and linux's and windows', empty when there are none" >&2
+            bad=1
+          else
+            while IFS= read -r line; do
+              case "$line" in '#'*) continue ;; esac
+              printf '%s\n' "$line"
+            done < api/systems.txt > "$d/systems.want"
+          fi
+          if [ -f api/systems.txt ] && ! git diff --no-index --exit-code "$d/systems.want" "$d/systems.txt"; then
+            echo "api: darwin's surface against linux's and windows' is not what api/systems.txt holds (- the file, + apidiff): a name or a signature one system alone has" >&2
+            bad=1
+          fi
+          # The last tag. A shallow clone may hold no tag at all, so it is red, not "no tag yet".
+          if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+            echo "api: the repository is a shallow clone, so the last tag cannot be told from no tag; fetch it whole (git fetch --unshallow --tags)" >&2
+            bad=1
+          elif [ -z "$(git tag --list 'v*')" ]; then
+            echo "api: no tag yet, so no break to hold to one; the systems and the marks are checked"
+          else
+            base="$(git describe --tags --abbrev=0 --match 'v*')" || {
+              echo "api: git describe finds no v tag from HEAD, though the repository has tags: a shallow clone, or a branch the tags are not on" >&2; done_ 1; }
+            GIT_INDEX_FILE="$d/index" git read-tree "$base^{tree}" || done_ 1
+            GIT_INDEX_FILE="$d/index" git checkout-index -a --prefix="$d/base/" || done_ 1
+            read_ base "$d/base" || done_ 1
+            set --
+            for sys in {{.API_SYSTEMS}}; do
+              "$bin" -m -incompatible "$d/base-$sys.exp" "$d/head-$sys.exp" > "$d/breaks-$sys.got" 2>"$d/breaks-$sys.err" || {
+                echo "api: apidiff could not compare $base with the tree for $sys:" >&2; cat "$d/breaks-$sys.err" >&2; done_ 1; }
+              set -- "$@" "$d/breaks-$sys.got"
+            done
+            LC_ALL=C sort -u "$@" > "$d/breaks.txt" || done_ 1
+            want="api/breaks/$base.txt"
+            [ -f "$want" ] || { want="$d/none.txt"; : > "$want"; }
+            if ! git diff --no-index --exit-code "$want" "$d/breaks.txt"; then
+              echo "api: the breaks since $base are not what api/breaks/$base.txt declares (- declared, + apidiff, for darwin, linux and windows): a commit that removes or changes an exported name adds apidiff's line there" >&2
+              bad=1
+            fi
+          fi
+          # The marks.
+          if [ ! -f api/marks.txt ]; then
+            echo "api: api/marks.txt is missing; it names each name that is not experimental, and none is today" >&2
+            bad=1
+          else
+            while IFS= read -r line; do
+              case "$line" in ''|'#'*) continue ;; esac
+              IFS='	' read -r pkg name mark rest <<EOF
+          $line
+          EOF
+              if [ -z "$mark" ] || [ -n "$rest" ] || [ "$mark" = experimental ]; then
+                echo "api: api/marks.txt has \"$line\", and wants <package>, <name> and a mark other than experimental, tab-separated" >&2
+                bad=1
+              elif ! go doc "./$pkg" "$name" > /dev/null 2>&1; then
+                echo "api: api/marks.txt marks $pkg $name $mark, and go doc finds no such name" >&2
+                bad=1
+              fi
+            done < api/marks.txt
+          fi
+          done_ $bad
+        timeout: 2m
+
+  # The ceiling is internal/cmd/measure's Ceiling, set by measure and moved
+  # only by what a pull request measures; release prints the count for the release notes.
+  size:
+    desc: Print the non-test Go lines outside internal/, testdata and dot folders, as wc -l counts them, and fail above the ceiling.
+    cmds:
+      - cmd: go run ./internal/cmd/measure size
+        timeout: 2m
+
+  verify:
+    desc: The module graph's downloads are what go.sum pins.
+    cmds:
+      - cmd: go mod verify
+        timeout: 2m
+
+  # gitleaks git passes, having scanned 0 commits, where git reads no history:
+  # a tree taken from a tarball, or a .git it may not read. So secrets asks git
+  # first, by git's own exit, and fails with a line that says why; gitleaks'
+  # own exit then decides the scan. secrets-tree needs no history.
+  secrets-tree:
+    desc: gitleaks over the tree as it stands, committed or not, with no history needed. The line to run on a tree taken from a tarball.
+    cmds:
+      - cmd: '{{.GITLEAKS}} dir . --config .gitleaks.toml --redact --no-banner'
+        timeout: 10m
+
+  secrets:
+    desc: gitleaks over the tree and over every commit. Fails where this tree has no history of its own to scan; secrets-tree scans the tree alone.
+    cmds:
+      - task: secrets-tree
+      - cmd: |
+          why=""
+          if ! top="$(git rev-parse --show-cdup 2>/dev/null)"; then
+            why="git reads no repository here (no .git, or one it may not read)"
+          elif [ -n "$top" ]; then
+            why="the repository git reads is a folder above this tree, not the tree's own"
+          elif ! git rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null; then
+            why="the repository has no commit"
+          fi
+          if [ -n "$why" ]; then
+            echo "secrets: no history to scan: $why, and gitleaks would pass having scanned 0 commits. secrets-tree scans the tree alone." >&2
+            exit 1
+          fi
+        timeout: 1m
+      - cmd: '{{.GITLEAKS}} git . --config .gitleaks.toml --redact --no-banner'
+        timeout: 10m
+
+  # vuln and licenses read the module graph, which a push changes only through
+  # go.mod or go.sum, so pre-push runs them only when either changed since their
+  # last pass here; release removes every stamp, so it runs both,
+  # and vuln there reads the database as it is that day. verify is release's
+  # alone.
+  #
+  # A .go change can still change what each finds, and pre-push leaves that to
+  # release: govulncheck, in source mode, fails on a vulnerable symbol the code
+  # reaches, so a new call into a vulnerable function of a module go.mod already
+  # requires; go-licenses checks the modules the library links, so a new import
+  # of a required module only its tests linked before. Neither fails open before
+  # a tag, as release runs both, and a .go source here would give back what
+  # (b) saves.
+  vuln:
+    desc: govulncheck over the module graph.
+    sources: [go.mod, go.sum, tools/govulncheck.mod, tools/govulncheck.sum, Taskfile.yml]
+    generates: [.task/pass/vuln]
+    cmds:
+      - rm -f .task/pass/vuln
+      - cmd: '{{.GOVULNCHECK}} ./...'
+        timeout: 10m
+      - mkdir -p .task/pass && touch .task/pass/vuln
+
+  licenses:
+    desc: Every module the library links is under a licence it may ship with.
+    sources: [go.mod, go.sum, tools/go-licenses.mod, tools/go-licenses.sum, Taskfile.yml]
+    generates: [.task/pass/licenses]
+    cmds:
+      - rm -f .task/pass/licenses
+      - cmd: '{{.GOLICENSES}} check ./... --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,MIT,ISC'
+        timeout: 10m
+      - mkdir -p .task/pass && touch .task/pass/licenses
+
+  # VERSION reaches gorelease and changelog as an environment variable, never
+  # as text pasted into their shell, so no value
+  # of it is read as shell. release checks its form before any member runs,
+  # and each of the two checks it again first, as either may run alone.
+  version:
+    internal: true
+    desc: VERSION is one tag such as v0.1.0, the whole value.
+    env:
+      VERSION: '{{.VERSION}}'
+    cmds:
+      # grep -x tests each line, so a value of two lines, one of them a good
+      # tag, would pass it. The case refuses an empty value and
+      # any byte but v, a digit and a dot, a newline among them, so the grep
+      # then sees one line, the whole value.
+      - cmd: |
+          bad() { printf 'the version is "%s", and wants one tag such as v0.1.0\n' "$VERSION"; exit 1; }
+          case "$VERSION" in ''|*[!v0-9.]*) bad ;; esac
+          printf '%s\n' "$VERSION" | grep -Eqx 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' || bad
+        timeout: 1m
+
+  gorelease:
+    desc: The API against the last tag, for VERSION.
+    env:
+      VERSION: '{{.VERSION}}'
+    cmds:
+      - task: version
+        vars:
+          VERSION: '{{.VERSION}}'
+      - cmd: '{{.GORELEASE}} -version="$VERSION"'
+        timeout: 5m
+
+  changelog:
+    desc: "CHANGELOG.md is what changie merge writes, and VERSION has its notes: .changes/<version>.md, or what changie batch would make of the unreleased entries."
+    env:
+      VERSION: '{{.VERSION}}'
+    cmds:
+      - task: version
+        vars:
+          VERSION: '{{.VERSION}}'
+      - cmd: |
+          v="$VERSION"
+          {{.CHANGIE}} merge --dry-run | diff - CHANGELOG.md || {
+            echo "CHANGELOG.md is not what changie merge writes"; exit 1; }
+          if [ -f ".changes/$v.md" ]; then
+            echo "the notes of $v: .changes/$v.md"; exit 0
+          fi
+          {{.CHANGIE}} batch "$v" --dry-run
+        timeout: 2m

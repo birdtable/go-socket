@@ -1,0 +1,5 @@
+go test fuzz v1
+string("person@example.com")
+string("{\"example.com/cap/app\":[1],\"example.com/cap/\\u0061pp\":[2]}")
+string("")
+byte('\x00')

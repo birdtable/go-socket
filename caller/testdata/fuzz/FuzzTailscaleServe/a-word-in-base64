@@ -1,0 +1,5 @@
+go test fuzz v1
+string("=?utf-8?b?em/Dq0BleGFtcGxlLmNvbQ==?=")
+string("")
+string("")
+byte('\x00')

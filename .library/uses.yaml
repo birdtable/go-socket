@@ -1,0 +1,359 @@
+# go-socket's uses file, read by a consumer's tooling: the jobs this repo does with a picked library or tool, the
+# ban that keeps a second way out, and the findings each pick removed, with each ban named as the row of
+# .golangci.yml that holds it.
+repo: "go-socket"
+plan_key_prefix: "go-socket"
+is_library: true
+picks:
+  - item: "github.com/docker/go-connections v0.8.2 (sockets)"
+    register_key: "unix-socket-listen"
+    job: "make a Unix socket with its mode; never below v0.8.0"
+    scope: "the listen package only"
+    ban: "depguard row layer-connections (github.com/docker/go-connections outside listen), row register-bans (github.com/cloudflare/tableflip, in every file; security: it takes inherited descriptors with no check that they are this process's and leaves its variable to every subprocess); forbidigo row unix-socket-listen umask (^(syscall|unix)\\.Umask$, in every file; security: the umask is the whole process's, so a file made meanwhile takes another mode)"
+    banned_calls:
+      - "github.com/cloudflare/tableflip"
+      - "syscall.Umask"
+      - "golang.org/x/sys/unix.Umask"
+    pattern: "(os|syscall|unix)\\.(Remove|Unlink)\\(|net\\.Dial(Timeout)?\\(\"unix\"|DialUnix\\("
+    sources: []
+  - item: "github.com/coreos/go-systemd/v22 v22.7.0 (activation)"
+    register_key: "unix-socket-listen"
+    job: "sockets passed by the service manager: activation.Files(true) with net.FileListener; names kept"
+    scope: "the listen package only"
+    ban: "depguard row layer-systemd (github.com/coreos/go-systemd outside listen); forbidigo preset row cli.config.3 (os.Getenv, os.LookupEnv, os.Environ; excluded for listen's tests, and by the preset's own exclusion for cmd/*/main.go and internal/config/, where no file is today) and row unix-socket-listen environment (^(syscall|unix|windows)\\.(Getenv|Environ)$, in every file; correctness: a passed socket comes from go-systemd's activation, which checks LISTEN_PID)"
+    banned_calls:
+      - "syscall.Getenv"
+      - "syscall.Environ"
+      - "golang.org/x/sys/unix.Getenv"
+      - "golang.org/x/sys/unix.Environ"
+      - "golang.org/x/sys/windows.Getenv"
+      - "golang.org/x/sys/windows.Environ"
+    pattern: "LISTEN_(FDS|FDNAMES|PID)"
+    sources: []
+  - item: "github.com/gofrs/flock v0.13.2"
+    register_key: "path-lock"
+    job: "the lock file <path>.lock held for the listener's life (TryLock, called directly); old enough from 22 Nov 2026"
+    scope: "the listen package only (go-files is not imported: go-socket requires none of our repos)"
+    ban: "depguard row os-host-flock (github.com/gofrs/flock outside listen), row register-bans (github.com/alexflint/go-filemutex and github.com/juju/fslock, in every file; security: each opens its lock file following a link and skips listen's checks, and juju/fslock reaches LockFileEx by DLL name and a raw call; github.com/nightlyone/lockfile, in every file; correctness: a pid file, not a kernel lock); forbidigo rows path-lock (^(syscall|unix)\\.Flock$ and ^windows\\.LockFileEx$, in every file; security: a hand lock skips listen's lock open, which follows no link or reparse point, and its refusals)"
+    banned_calls:
+      - "github.com/alexflint/go-filemutex"
+      - "github.com/juju/fslock"
+      - "github.com/nightlyone/lockfile"
+      - "syscall.Flock"
+      - "golang.org/x/sys/unix.Flock"
+      - "golang.org/x/sys/windows.LockFileEx"
+    sources: []
+  - item: "golang.org/x/sys v0.50.0 (GetsockoptUcred, GetsockoptXucred, windows)"
+    register_key: "peer-identity"
+    job: "the kernel's read of who is at the other end of a Unix socket; Windows token calls, and the access list by SID of peer's pipe"
+    scope: "the peer package (build-tagged files) alone"
+    ban: "depguard row os-host (golang.org/x/sys outside peer: an operating-system call lives in the per-system files), row register-bans (github.com/natefinch/npipe, in every file; security: no access list set as its pipe is made, so another account can open it or take the name first; tailscale.com/client/local, in every file; correctness: WhoIs answers wrongly behind a serve proxy; tailscale.com/safesocket, in every file; security: its Windows pipe lets in every local user or its creator alone, never the program's accounts, and on Unix it removes what is at the path and sets the mode after the bind, ignoring the error); forbidigo rows peer-identity, each for security, as each reaches a call past x/sys's named calls: row peer-identity raw call (Syscall, RawSyscall, each numbered and N form, their NoError forms, and AllThreadsSyscall and AllThreadsSyscall6, of syscall or golang.org/x/sys/unix, in every file, peer's system files included) and row peer-identity proc call (Call on a Proc or LazyProc, of syscall or golang.org/x/sys/windows, in every file but the two calls x/sys does not wrap, each excepted by its file and its own source line: peer/peer_windows.go's ImpersonateNamedPipeClient and peer/peer_windows_test.go's CreateRestrictedToken), row peer-identity proc acquisition (NewLazyDLL, NewLazySystemDLL, LoadDLL, MustLoadDLL, LoadLibrary, LoadLibraryEx, GetProcAddress and its ByOrdinal form, LazyDLL.NewProc, and DLL.FindProc and DLL.MustFindProc and their ByOrdinal forms, of syscall or golang.org/x/sys/windows, in every file but the two acquisitions of those procs, each excepted by its file and its own source line, which names advapi32.dll and the proc), row peer-identity proc use (the two excepted procs used on their own Call lines alone, never copied, embedded or held as an interface), row peer-identity proc field (Name, System, Handle and Dll of DLL, LazyDLL, Proc or LazyProc, read or written, in every file) and row peer-identity proc type (DLL, LazyDLL, Proc and LazyProc named, as a literal, a field, a parameter or a return, in every file)"
+    banned_calls:
+      - "github.com/natefinch/npipe"
+      - "tailscale.com/client/local"
+      - "tailscale.com/safesocket"
+      - "syscall.Syscall"
+      - "syscall.Syscall6"
+      - "syscall.Syscall9"
+      - "syscall.Syscall12"
+      - "syscall.Syscall15"
+      - "syscall.Syscall18"
+      - "syscall.SyscallN"
+      - "syscall.RawSyscall"
+      - "syscall.RawSyscall6"
+      - "syscall.AllThreadsSyscall"
+      - "syscall.AllThreadsSyscall6"
+      - "golang.org/x/sys/unix.Syscall"
+      - "golang.org/x/sys/unix.Syscall6"
+      - "golang.org/x/sys/unix.Syscall9"
+      - "golang.org/x/sys/unix.SyscallNoError"
+      - "golang.org/x/sys/unix.RawSyscall"
+      - "golang.org/x/sys/unix.RawSyscall6"
+      - "golang.org/x/sys/unix.RawSyscallNoError"
+      - "syscall.Proc.Call"
+      - "syscall.LazyProc.Call"
+      - "golang.org/x/sys/windows.Proc.Call"
+      - "golang.org/x/sys/windows.LazyProc.Call"
+      - "syscall.NewLazyDLL"
+      - "syscall.LoadDLL"
+      - "syscall.MustLoadDLL"
+      - "syscall.LoadLibrary"
+      - "syscall.GetProcAddress"
+      - "syscall.LazyDLL.NewProc"
+      - "syscall.DLL.FindProc"
+      - "syscall.DLL.MustFindProc"
+      - "golang.org/x/sys/windows.NewLazyDLL"
+      - "golang.org/x/sys/windows.NewLazySystemDLL"
+      - "golang.org/x/sys/windows.LoadDLL"
+      - "golang.org/x/sys/windows.MustLoadDLL"
+      - "golang.org/x/sys/windows.LoadLibrary"
+      - "golang.org/x/sys/windows.LoadLibraryEx"
+      - "golang.org/x/sys/windows.GetProcAddress"
+      - "golang.org/x/sys/windows.GetProcAddressByOrdinal"
+      - "golang.org/x/sys/windows.LazyDLL.NewProc"
+      - "golang.org/x/sys/windows.DLL.FindProc"
+      - "golang.org/x/sys/windows.DLL.MustFindProc"
+      - "golang.org/x/sys/windows.DLL.FindProcByOrdinal"
+      - "golang.org/x/sys/windows.DLL.MustFindProcByOrdinal"
+      - "syscall.DLL"
+      - "syscall.LazyDLL"
+      - "syscall.Proc"
+      - "syscall.LazyProc"
+      - "syscall.LazyDLL.Name"
+      - "syscall.LazyProc.Name"
+      - "syscall.DLL.Name"
+      - "syscall.DLL.Handle"
+      - "syscall.Proc.Name"
+      - "syscall.Proc.Dll"
+      - "golang.org/x/sys/windows.DLL"
+      - "golang.org/x/sys/windows.LazyDLL"
+      - "golang.org/x/sys/windows.Proc"
+      - "golang.org/x/sys/windows.LazyProc"
+      - "golang.org/x/sys/windows.LazyDLL.Name"
+      - "golang.org/x/sys/windows.LazyDLL.System"
+      - "golang.org/x/sys/windows.LazyProc.Name"
+      - "golang.org/x/sys/windows.DLL.Name"
+      - "golang.org/x/sys/windows.DLL.Handle"
+      - "golang.org/x/sys/windows.Proc.Name"
+      - "golang.org/x/sys/windows.Proc.Dll"
+    pattern: "SO_PEERCRED|LOCAL_PEERCRED|Getsockopt(Ucred|Xucred)\\("
+    sources: []
+  - item: "github.com/Microsoft/go-winio v0.6.4"
+    register_key: "peer-identity"
+    job: "the Windows named pipe, its handle through Fd(), the dial at a chosen impersonation level; listen.Listen's pipe on Windows"
+    scope: "the peer package (Windows files), and listen/pipe_windows.go and its test alone"
+    ban: "depguard row os-host-winio (github.com/Microsoft/go-winio outside peer, listen/pipe_windows.go and listen/pipe_windows_test.go), row register-bans (github.com/natefinch/npipe, in every file; security: no access list set as its pipe is made); the anonymous dial of DialPipe's default is refused by name at run time (peer/peer_windows.go errAnonymous), not by a lint row"
+    banned_calls:
+      - "github.com/natefinch/npipe"
+    pattern: "winio\\.(ListenPipe|DialPipe|DialPipeContext|DialPipeAccess)\\("
+    sources: []
+  - item: "std encoding/json/v2"
+    register_key: "json-strict"
+    job: "strict decode of the Tailscale capability document: duplicate names refused by v2, unknown members by RejectUnknownMembers"
+    scope: "caller package (wire, its other user, has left go-socket)"
+    ban: "none: review only"
+    banned_calls: []
+    pattern: "\\b(oneKeyEach|exactKeys)\\b|func walk\\(|DisallowUnknownFields"
+    sources: []
+  - item: "std net/http, mime and strings (caller)"
+    register_key: "std-small"
+    job: "the HTTP-header readers of caller: LoginProxy, TailscaleServe, ParseVersion and TailscaledUID, on the standard library alone"
+    scope: "the caller package; it imports neither peer nor listen"
+    ban: "none: review only; depguard row layer-caller holds that caller imports neither peer nor listen"
+    banned_calls: []
+    pattern: "Tailscale-User-Login|Tailscale-App-Capabilities|Remote-User"
+    sources: []
+  - item: "std errors.ErrUnsupported"
+    register_key: "std-small"
+    job: "named errors that wrap ErrUnsupported: ErrNotActivated, ErrCannotSay"
+    scope: "anywhere"
+    ban: "none: review only"
+    banned_calls: []
+    pattern: "errors\\.New\\(\"[^\"]*(unsupported|not supported)"
+    sources: []
+  - item: "std testing and testing/synctest"
+    register_key: "std-synctest"
+    job: "tests on the standard library; fuzz targets with their seeds checked in"
+    scope: "_test.go files only"
+    ban: "none of go-socket's own (a test library not taken for a preference has no row here); the preset's row no-assert is the consumer's, not this repo's"
+    banned_calls: []
+    sources: []
+  - item: "tool: go-task"
+    register_key: "tool:go-task"
+    job: "run the repo's checks as one Taskfile with the tiers pre-commit, pre-push and release"
+    scope: "v3.54.0; the repo's own Taskfile.yml, members called from cmds, never deps"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "exec\\.Command\\(\"make\"|\\.stamp\\b|tier[A-Za-z]*Pool"
+    sources: []
+  - item: "tool: golangci-lint"
+    register_key: "tool:golangci-lint"
+    job: "lint with the consumer's Go preset plus this repo's ban rows (depguard, forbidigo)"
+    scope: "v2.15.0; the repo's own .golangci.yml"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "build\\.(ImportDir|Default)\\b|parser\\.ImportsOnly|lint-debt|lintdebt"
+    sources: []
+  - item: "tool: gitleaks"
+    register_key: "tool:gitleaks"
+    job: "secret scan of the tree and the commit"
+    scope: "v8.30.1; the repo's own .gitleaks.toml"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "regexp\\.MustCompile\\(.*(token|secret|password)"
+    sources: []
+  - item: "tool: changie"
+    register_key: "tool:changie"
+    job: "change files and the changelog; the library releases with a tag and a changie entry"
+    scope: "v1.26.0; the repo's own .changie.yaml"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "git log|conventional commit"
+    sources: []
+  - item: "tool: hatch"
+    register_key: "tool:hatch"
+    job: "judge the tests in the test member (a failure, a skip or no test is red), and hold each tier to its budget in gate/budgets.yaml"
+    scope: "v0.2.0; every value it judges by is a flag in Taskfile.yml"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "test2json|json:\"Action\"|\"-json\"|getloadavg|vm\\.loadavg"
+    sources: []
+  - item: "tool: govulncheck"
+    register_key: "tool:govulncheck"
+    job: "vulnerability scan of the module graph in the Taskfile"
+    scope: "v1.9.0"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "osv\\.dev|vuln\\.go\\.dev"
+    sources: []
+  - item: "tool: go-licenses"
+    register_key: "tool:go-licenses"
+    job: "licence and notice check of the module graph"
+    scope: "v2.0.1"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "licen[cs]e.*walk|filepath\\.Walk.*LICENSE"
+    sources: []
+  - item: "tool: gorelease"
+    register_key: "tool:gorelease"
+    job: "API compatibility report at release (the library keeps no API.txt)"
+    scope: "the repo's own pin"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "API\\.txt|go/types.*Exported"
+    sources: []
+  - item: "tool: apidiff"
+    register_key: "tool:apidiff"
+    job: "the API check in pre-push and release: breaks against the last tag and the surface between systems, per system"
+    scope: "the repo's own pin"
+    ban: "none: review only (the consumer's config check reads the repo's config)"
+    banned_calls: []
+    pattern: "API\\.txt|go/types.*Exported"
+    sources: []
+not_for_this_repo:
+  - item: "go-files/lock (and go-files/trust, appdirs, write, confine)"
+    why: "go-socket requires no repo of ours; gofrs/flock is called directly in listen, and the caller runs trust's walk on the folder first"
+    sources: []
+  - item: "any framing library for wire (and any library at all in wire), until wire left go-socket"
+    why: "guests imported wire by exact path and linked only std and x/sys; a link test held it"
+    sources: []
+  - item: "github.com/cloudflare/tableflip, ory/graceful, pseidemann/finish, libp2p/go-socket-activation, systemd-socket-proxyd"
+    why: "not taken for the listen job: tableflip banned for security (it takes inherited descriptors with no check that they are this process's, and leaves its variable to every subprocess); ory/graceful, pseidemann/finish and go-socket-activation for a preference (a different job, or no gain over go-systemd), so no ban; systemd-socket-proxyd is no module, and that it breaks peer checks is a note in listen/README.md"
+    sources: []
+  - item: "github.com/tailscale/peercred, natefinch/npipe, tailscale.com/client/local, tailscale.com/safesocket"
+    why: "not taken for peer identity: peercred for a preference (no version to pin), so no ban; natefinch/npipe (no access list at creation), client/local (WhoIs answers wrongly behind a serve proxy) and safesocket (its pipe's access list and its socket's mode are not the program's) banned, each for the reason its row gives"
+    sources: []
+  - item: "goreleaser config"
+    why: "a library releases with a tag and a changie entry and builds nothing"
+    sources: []
+  - item: "gopsutil and go-landlock"
+    why: "not used here; they belong to go-proc and the programs' host ports"
+    sources: []
+findings:
+  - where: "peer/peer_linux.go:1-65 (two hand-written SO_PEERCRED reads)"
+    what: "getsockopt for the peer credential written by hand, two copies"
+    lines: 35
+    replaced_by:
+      - "golang.org/x/sys v0.50.0 (GetsockoptUcred, GetsockoptXucred, windows)"
+    removed_by:
+      - "go-socket-4"
+    sources: []
+    pattern: "syscall.GetsockoptInt with SO_PEERCRED / getsockopt Ucred read by hand in peer/peer_linux.go (two copies)"
+    state: "closed"
+    note: "gone: the peer is read through x/sys. peer/peer_linux.go:41 is the one read, unix.GetsockoptUcred inside raw.Control (line 36); no syscall.GetsockoptInt is left in any file, and the forbidigo raw-call row and depguard row os-host hold it so"
+  - where: "peer/peer_darwin.go:1-63, peer/peer_xucred.go:1-31, peer_xucred_test.go, testdata/fuzz/FuzzXucredUID/ (raw Syscall6, unsafe struct parser)"
+    what: "the macOS and FreeBSD xucred read through Syscall6 with a hand parser and its fuzz target"
+    lines: 134
+    replaced_by:
+      - "golang.org/x/sys v0.50.0 (GetsockoptUcred, GetsockoptXucred, windows)"
+    removed_by:
+      - "go-socket-4"
+    sources: []
+    symbol: "peer/peer_darwin.go, peer/peer_xucred.go: Syscall6 and an unsafe xucred struct parser; FuzzXucredUID"
+    state: "closed"
+    note: "gone: peer/peer_darwin.go, peer/peer_xucred.go, peer/peer_xucred_test.go and the FuzzXucredUID seeds are deleted; macOS and FreeBSD read the peer at peer/peer_bsd.go:38 by unix.GetsockoptXucred, and no Syscall6 is left in any file, which the forbidigo raw-call row holds"
+  - where: "listen/listen_unix.go:1-296 (aside-and-link placement, madeName, sweepAsides)"
+    what: "placing the socket aside and renaming it in, and the sweep of asides; about 279 lines go, 17 stay"
+    lines: 279
+    replaced_by:
+      - "github.com/docker/go-connections v0.8.2 (sockets)"
+      - "github.com/gofrs/flock v0.13.2"
+    removed_by:
+      - "go-socket-3"
+    sources: []
+    symbol: "listen/listen_unix.go: placeAside, madeName, sweepAsides (aside-and-link socket placement)"
+    state: "closed"
+    note: "gone: listen/listen_unix.go is deleted; Listen holds <path>.lock by flock.New and TryLock (listen/listen.go:139-140) and makes the socket by sockets.NewUnixSocketWithOpts (listen/listen.go:212), and no placeAside, madeName or sweepAsides is left in any file"
+  - where: "listen/web.go:1-179"
+    what: "the accept counter and the uid gate beside the listener; the gate by principal moves to peer.Listener (go-socket-4). serve.go is unchanged by go-socket-3"
+    lines: 63
+    replaced_by:
+      - "github.com/docker/go-connections v0.8.2 (sockets)"
+    removed_by:
+      - "go-socket-3"
+      - "go-socket-4"
+    sources: []
+    symbol: "listen/web.go: the Unix field and the accept counter"
+    state: "closed"
+    note: "gone: listen.Listener is cut to its net.Listener, name, local and ConnContext (listen/web.go:25-37), with no Unix field and no accept counter; the gate by principal is peer.Listener (peer/peer.go:96)"
+  - where: "peer/tailscale.go (oneKeyEach and walk, 48 lines)"
+    what: "a hand-written walk that refuses a JSON key written twice"
+    lines: 48
+    replaced_by:
+      - "std encoding/json/v2"
+    removed_by:
+      - "go-socket-5"
+    sources: []
+    symbol: "peer/tailscale.go: oneKeyEach and walk (duplicate-key walk)"
+    state: "closed"
+    note: "gone: the Tailscale reader is in caller, and peer/tailscale.go is deleted; caller/tailscale.go:170 capValues reads the document by encoding/json/v2's json.Unmarshal (line 172), which refuses a name written twice, and no oneKeyEach or walk is left in any file"
+  - where: "wire/envelope.go (299 lines: the hand-made strict decode)"
+    what: "strict decode of unknown members written by hand"
+    lines: 299
+    replaced_by:
+      - "std encoding/json/v2"
+    removed_by:
+      - "go-socket-6"
+    sources: []
+    symbol: "wire/envelope.go: the hand-made strict decode (Parse and Decode)"
+    state: "closed"
+    note: "gone: wire/envelope.go came at 195 lines with no hand-made decode; Parse (line 35) and Decode (line 63) read through json.Unmarshal with json.RejectUnknownMembers(true) (line 80), and depguard row layer-wire holds wire to the standard library"
+  - cut: true
+    where: "listen/cache.go (72 lines: CacheControl, Hashed), cache_test.go, listen_other.go (16), guard_unix_test.go"
+    what: "CacheControl, Hashed and the listen on other systems without SocketGroup: no library replaces them, as a program keeps its own cache rule; SocketGroup stays"
+    lines: 88
+    symbol: "CacheControl, Hashed"
+    removed_by:
+      - "go-socket-3"
+    sources: []
+    state: "closed"
+    note: "gone: listen/cache.go, listen/cache_test.go, listen/listen_other.go and listen/guard_unix_test.go are deleted; no CacheControl or Hashed is left in any file, and SocketGroup stays at listen/web.go:109"
+  - cut: true
+    where: "listen/web.go and listen/serve.go: Guard, GuardFunc, Accepted"
+    what: "Guard, GuardFunc and Accepted: deleted with no alias; no library replaces them"
+    lines: null
+    symbol: "Guard, GuardFunc, Accepted"
+    removed_by:
+      - "go-socket-3"
+    sources: []
+    state: "closed"
+    note: "gone: they are deleted with no alias; no Guard, GuardFunc or Accepted is declared or named in any file"
+blockers:
+  - ticket: "go-socket-2"
+    why: "the import commit and the repo's own Taskfile and configs; go-systemd and x/sys come with it"
+  - ticket: "go-socket-3"
+    why: "removes the last listener and placement copy; adds go-connections and gofrs/flock; the umask and tableflip bans wait on it"
+  - ticket: "go-socket-4"
+    why: "removes the hand-written peer credential reads; the Syscall6 forbidigo and peercred bans wait on it"
+  - ticket: "go-socket-5"
+    why: "removes the duplicate-key walk and creates the caller package; json/v2 pick"
+  - ticket: "go-socket-6"
+    why: "wire and registry on the standard library alone; the strict decode goes"
+  - ticket: "go-socket-7"
+    why: "the go-winio pick and the Windows peer; the npipe ban waits on it"
+  - ticket: "go-socket-8"
+    why: "the rest of caller (Front, LoginProxy, Roles, names, tailnet kit)"
+notes:
+  - "Each finding is closed, and its note says where the code went. A closed finding stays one release as the record."
+  - "Each call the matrix gave as prose is in its pick's pattern: a bind that unlinks or a dial probe (go-connections), a LISTEN_FDS reader (go-systemd), a second SO_PEERCRED or LOCAL_PEERCRED read (x/sys), a pipe made or dialled outside peer's own calls (go-winio), a duplicate-key walker or a strict decode by hand (json/v2), and each tool's hand-written stand-in. The raw-call, umask, lock and environment rows hold in every file, peer's system files included, so they hold in more files than the matrix's ban; the proc-call row holds in every file but the two calls x/sys does not wrap, each excepted by its own source line, and the proc-acquisition row in every file but the two acquisitions of those procs, each excepted by its own line; the proc-use row holds those two procs to their own Call lines, and the proc-field and proc-type rows hold in every file."
+  - "A consumer's tooling regenerates its published matrix from this file."

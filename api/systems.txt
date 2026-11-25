@@ -1,0 +1,3 @@
+# apidiff's whole report from darwin's surface to linux's and to windows', each line led by the
+# system and a tab. A line starting with # is not compared. Nothing else today: the three systems
+# export the same names.

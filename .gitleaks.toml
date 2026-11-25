@@ -1,0 +1,12 @@
+# go-socket's secret scan: gitleaks's own rules, run over the tree and every
+# commit by the pre-push tier (Taskfile.yml, secrets).
+title = "go-socket"
+
+[extend]
+useDefault = true
+
+# A Go checksum file holds module hashes, which the generic key rule reads as
+# keys; it never holds a secret.
+[[allowlists]]
+description = "Go checksum files"
+paths = ['''(^|/)go\.sum$''', '''(^|/)tools/[^/]+\.sum$''']

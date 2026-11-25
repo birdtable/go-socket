@@ -1,0 +1,35 @@
+# go-socket's library file, read by a consumer's tooling: each package a program imports, its one job, and the
+# calls of that job a program may no longer hold by hand once it imports the package, each call in its import-path
+# or package-and-name form.
+#
+# What the programs gave as prose and has no such form stays with the programs' own review patterns: net.Listen of
+# "unix" and LISTEN_FDS read by hand (listen), and a gate header or a serve command line read by hand (caller).
+# wire left go-socket: a program serves net/http on the listener listen returns, so its frame calls
+# left with it. gate.Peered is one program's own name, so it is that program's finding, not a call of this file.
+packages:
+  - package: "listen"
+    job: "listen on a Unix socket or a TCP address with the socket's mode and group set as it is made, the lock file <path>.lock held for the listener's life, sockets passed by the service manager taken with their names, and net/http served and stopped on them"
+    banned_calls:
+      - "github.com/docker/go-connections"
+      - "github.com/coreos/go-systemd/v22"
+      - "github.com/gofrs/flock"
+      - "syscall.Umask"
+      - "golang.org/x/sys/unix.Umask"
+      - "github.com/cloudflare/tableflip"
+      - "github.com/ory/graceful"
+      - "github.com/pseidemann/finish"
+      - "github.com/libp2p/go-socket-activation"
+  - package: "peer"
+    job: "say who is at the other end of a Unix socket or a named pipe, by the kernel's answer, and gate a listener by principal"
+    banned_calls:
+      - "github.com/tailscale/peercred"
+      - "github.com/natefinch/npipe"
+      - "golang.org/x/sys/unix.GetsockoptUcred"
+      - "golang.org/x/sys/unix.GetsockoptXucred"
+      - "syscall.Syscall"
+      - "syscall.Syscall6"
+      - "syscall.RawSyscall"
+  - package: "caller"
+    job: "read who a request is from by the header of the proxy in front (Tailscale serve's login and capabilities, a login proxy's Remote-User), with the login fold, the name grammar and the roles a grant gives"
+    banned_calls:
+      - "mime.WordDecoder"

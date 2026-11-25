@@ -1,0 +1,5 @@
+#!/bin/sh
+# go-socket's pre-push hook: the pre-push tier of Taskfile.yml, run by the
+# pinned go-task. `go tool -modfile=tools/task.mod task hooks` installs it.
+cd "$(git rev-parse --show-toplevel)" || exit 1
+exec go tool -modfile=tools/task.mod task pre-push

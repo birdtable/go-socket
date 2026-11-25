@@ -1,0 +1,655 @@
+# go-socket's golangci-lint config: a shared Go base config, unchanged, with
+# go-socket's slots filled from layers.yaml and the ban rows for libraries
+# weighed and not taken, and the slot lines dropped.
+# The preset's own header follows.
+#
+# Shared golangci-lint base for Go projects.
+#
+# Written by hand, never generated. Each linter and setting names the rule ids
+# it holds; each of those rules names this file in its check. golangci-lint v2,
+# pinned at 2.15.0. A project's .golangci.yml is generated from this file,
+# unchanged, and the project's own lint/project.yml: the "# slot <name> begin"
+# and "# slot <name> end" lines mark what a project may replace, and the project
+# file maps each slot's name to its text. Lines starting "# per-project:" name
+# paths that only a project knows (its runner, terminal module, adapters, paths
+# helper, layer table); a project fills them in its slots.
+version: "2"
+
+run:
+  tests: true
+
+issues:
+  # go.errors.4, gates.plants.10: no cap, so repeats are not hidden.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  # gates.plants.10: a second hit on one line still shows.
+  uniq-by-line: false
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose # go.style.4
+    - contextcheck # go.concurrency.1
+    - depguard # cli.config.7, cli.process.1, cli.look.1, arch.shared.7, arch.ports.11, tests.doubles.2, go.style.5; arch.layers.2/5/7/9, arch.ports.1/2/8 per project
+    - dupl # code.duplication.1 (the within-package tripwire)
+    - errorlint # go.errors.2 (wrapcheck stays off, same rule)
+    - exhaustive # code.idioms.3
+    - exptostd # code.idioms.2
+    - forbidigo # go.errors.3, go.errors.4, go.concurrency.1, cli.config.3, cli.config.5, cli.errors.3, cli.output.2, cli.process.1, arch.ports.1, arch.ports.23, tests.admission.5, tests.isolation.6
+    - gochecknoglobals # arch.ports.12
+    - gochecknoinits # go.layout.2
+    - gocognit # code.size.3
+    - gocritic # code.comments.3
+    - gocyclo # code.idioms.4
+    - godoclint # code.comments.4
+    - gomoddirectives # go.layout.3
+    - gosec # cli.process.1, supply.scans.3 (every rule)
+    - iface # arch.ports.10
+    - interfacebloat # go.style.1
+    - modernize # code.idioms.2
+    - noctx # go.concurrency.1, go.style.4
+    - nolintlint # gates.exemptions.1, gates.exemptions.2
+    - paralleltest # go.cycle.2, tests.runners.4: a test calls t.Parallel, or says "// serial: <why>" on a nolint
+    - revive # code.idioms.1, code.naming.1, code.comments.4, code.size.4, go.errors.4, go.concurrency.2, arch.structure.7
+    - sloglint # go.logging.1, go.logging.2
+    - thelper # go.style.5
+    - tparallel # go.cycle.2, tests.runners.4: a test and its subtests agree on t.Parallel
+    - usestdlibvars # code.idioms.2
+  # per-project: sqlclosecheck and rowserrcheck where database/sql is imported (go.style.4).
+
+  settings:
+    depguard:
+      rules:
+        # cli.config.7: flag parsing lives in cmd/ and the command packages only.
+        cli-flags:
+          files: ["$all", "!**/cmd/**"]
+          # per-project: also "!**/<command package>/**"
+          deny:
+            - pkg: flag
+              desc: "cli.config.7: flags are parsed in cmd/ only"
+            - pkg: github.com/spf13/pflag
+              desc: "cli.config.7: flags are parsed in cmd/ only"
+            - pkg: github.com/spf13/cobra
+              desc: "cli.config.7: flags are parsed in cmd/ only"
+            - pkg: github.com/urfave/cli
+              desc: "cli.config.7: flags are parsed in cmd/ only"
+        # cli.process.1: only the runner starts programs.
+        owner-exec:
+          # cli.process.1: a library has no runner. Only its tests start a process:
+          # the test binary again, as a child, or sh to hand that child a socket.
+          # internal/cmd/testexec, a tool of the Taskfile's, starts the test binary
+          # go test names to it, which is all it does.
+          files: ["$all", "!$test", "!**/internal/cmd/testexec/run.go"]
+          deny:
+            - pkg: os/exec
+              desc: "cli.process.1: start programs through the runner"
+        # cli.look.1, arch.shared.7: terminal libraries only in the shared UI module.
+        owner-ui:
+          files: ["$all"]
+          # per-project: "!**/<shared UI module>/**"
+          deny:
+            - pkg: golang.org/x/term
+              desc: "arch.shared.7: terminal detection belongs to the shared UI module"
+            - pkg: github.com/mattn/go-isatty
+              desc: "arch.shared.7: terminal detection belongs to the shared UI module"
+            - pkg: github.com/charmbracelet
+              desc: "cli.look.1: terminal styling belongs to the shared UI module"
+            - pkg: github.com/fatih/color
+              desc: "cli.look.1: terminal styling belongs to the shared UI module"
+            - pkg: github.com/muesli/termenv
+              desc: "cli.look.1: terminal styling belongs to the shared UI module"
+        # arch.ports.23: operating-system packages only in the host layer.
+        os-host:
+          # arch.ports.23: peer is the host layer, and x/sys is imported there
+          # alone.
+          files: ["$all", "!**/peer/**"]
+          deny:
+            - pkg: golang.org/x/sys
+              desc: "arch.ports.23: an operating-system package belongs to the host layer, its calls in the per-system files"
+            - pkg: github.com/shirou/gopsutil
+              desc: "arch.ports.23: an operating-system package belongs to the host layer, its calls in the per-system files"
+        # arch.ports.23: listen's lock file is the one place flock is used;
+        # peer, which the row above lets import x/sys, may not take it.
+        os-host-flock:
+          files: ["$all", "!**/listen/**"]
+          deny:
+            - pkg: github.com/gofrs/flock
+              desc: "arch.ports.23: a lock file is listen's alone"
+        # arch.ports.23: go-winio is imported directly in peer's named pipe, and
+        # in listen's Windows pipe file and its test alone, as listen serves a
+        # go-winio pipe there.
+        os-host-winio:
+          files: ["$all", "!**/peer/**", "!**/listen/pipe_windows.go", "!**/listen/pipe_windows_test.go"]
+          deny:
+            - pkg: github.com/Microsoft/go-winio
+              desc: "arch.ports.23: a named pipe is peer's, and listen's Windows pipe file's, alone"
+        # arch.ports.11: wire by hand in the entry point.
+        no-di:
+          files: ["$all"]
+          deny:
+            - pkg: go.uber.org/fx
+              desc: "arch.ports.11: no dependency-injection framework"
+            - pkg: go.uber.org/dig
+              desc: "arch.ports.11: no dependency-injection framework"
+            - pkg: github.com/google/wire
+              desc: "arch.ports.11: no dependency-injection framework"
+            - pkg: github.com/samber/do
+              desc: "arch.ports.11: no dependency-injection framework"
+        # go.style.5: tests use the standard testing package only; no assertion
+        # library.
+        no-assert:
+          files: ["$test"]
+          deny:
+            - pkg: github.com/stretchr/testify
+              desc: "go.style.5: a test uses the standard testing package only"
+            - pkg: gotest.tools
+              desc: "go.style.5: a test uses the standard testing package only"
+            - pkg: github.com/onsi/gomega
+              desc: "go.style.5: a test uses the standard testing package only"
+            - pkg: github.com/onsi/ginkgo
+              desc: "go.style.5: a test uses the standard testing package only"
+            - pkg: github.com/matryer/is
+              desc: "go.style.5: a test uses the standard testing package only"
+            - pkg: github.com/frankban/quicktest
+              desc: "go.style.5: a test uses the standard testing package only"
+        # tests.doubles.2: no mock library; a fake is written by hand.
+        no-mocks:
+          files: ["$all"]
+          deny:
+            - pkg: github.com/golang/mock
+              desc: "tests.doubles.2: no mock library"
+            - pkg: go.uber.org/mock
+              desc: "tests.doubles.2: no mock library"
+            - pkg: github.com/stretchr/testify/mock
+              desc: "tests.doubles.2: no mock library"
+            - pkg: github.com/vektra/mockery
+              desc: "tests.doubles.2: no mock library"
+        # per-project (go.logging.1, daemon kind only):
+        # no-std-log:
+        #   files: ["$all"]
+        #   deny:
+        #     - pkg: log
+        #       desc: "go.logging.1: log through the shared slog logger"
+        # per-project (arch.layers.2, arch.layers.5, arch.layers.7, arch.layers.9,
+        # arch.ports.1, arch.ports.2, arch.ports.8): the layer and port rows are
+        # rendered from the project's layer table, never written here.
+        # layers.yaml: listen, peer and caller never import one another.
+        layer-listen:
+          files: ["**/listen/**"]
+          deny:
+            - pkg: github.com/birdtable/go-socket/peer
+              desc: "layers.yaml: listen does not import peer"
+            - pkg: github.com/birdtable/go-socket/caller
+              desc: "layers.yaml: listen does not import caller"
+        layer-peer:
+          files: ["**/peer/**"]
+          deny:
+            - pkg: github.com/birdtable/go-socket/listen
+              desc: "layers.yaml: peer does not import listen"
+            - pkg: github.com/birdtable/go-socket/caller
+              desc: "layers.yaml: peer does not import caller"
+        layer-caller:
+          files: ["**/caller/**"]
+          deny:
+            - pkg: github.com/birdtable/go-socket/peer
+              desc: "layers.yaml: caller does not import peer"
+            - pkg: github.com/birdtable/go-socket/listen
+              desc: "layers.yaml: caller does not import listen"
+        # layers.yaml: internal/cmd/measure and internal/cmd/testexec, the
+        # repo's tasks, import the standard library alone, their tests included.
+        layer-measure:
+          files: ["**/internal/cmd/measure/**", "**/internal/cmd/testexec/**"]
+          list-mode: strict
+          allow:
+            - $gostd
+        # layers.yaml: go-testkit is imported by a test only.
+        layer-testkit:
+          files: ["$all", "!$test"]
+          deny:
+            - pkg: github.com/birdtable/go-testkit
+              desc: "layers.yaml: go-testkit is imported by a test only"
+        # layers.yaml: go-systemd is listen's library alone.
+        layer-systemd:
+          files: ["$all", "!**/listen/**"]
+          deny:
+            - pkg: github.com/coreos/go-systemd
+              desc: "layers.yaml: go-systemd is imported by listen only"
+        # layers.yaml: go-launchd is listen's library alone, in activated_darwin.go.
+        layer-launchd:
+          files: ["$all", "!**/listen/activated_darwin.go"]
+          deny:
+            - pkg: github.com/bored-engineer/go-launchd
+              desc: "layers.yaml: go-launchd is imported by listen's activated_darwin.go only"
+        # layers.yaml: go-connections' sockets is listen's library alone.
+        layer-connections:
+          files: ["$all", "!**/listen/**"]
+          deny:
+            - pkg: github.com/docker/go-connections
+              desc: "layers.yaml: go-connections is imported by listen only"
+        # The bans for go-socket: a library weighed for a job
+        # and not taken is banned only when it is unsafe or wrong for that job,
+        # and each row says why. One not taken for a
+        # preference alone has no row.
+        register-bans:
+          files: ["$all"]
+          deny:
+            - pkg: github.com/alexflint/go-filemutex
+              desc: "security: it opens its lock file following a link and skips listen's checks of the lock"
+            - pkg: github.com/juju/fslock
+              desc: "security: it opens its lock file following a link, skips listen's checks, and reaches LockFileEx by DLL name and a raw call past the proc rows"
+            - pkg: github.com/cloudflare/tableflip
+              desc: "security: it takes inherited descriptors as its parent's pipes and listeners with no check that they are this process's, and leaves its variable to every subprocess; a passed socket comes from go-systemd's activation, which checks LISTEN_PID"
+            - pkg: github.com/nightlyone/lockfile
+              desc: "correctness: a pid file, not a kernel lock, so a lock left by a dead or reused pid is held or taken wrongly"
+            - pkg: github.com/natefinch/npipe
+              desc: "security: its named pipe has no access list set at creation, so another account can open it or take the name first"
+            - pkg: tailscale.com/client/local
+              desc: "correctness: WhoIs answers wrongly behind a serve proxy, so the caller it names is not the caller"
+            - pkg: tailscale.com/safesocket
+              desc: "security: its Windows pipe lets every local user or its creator alone in, never the program's accounts, and on Unix it removes what is at the path and sets the mode after the bind"
+        # arch.shared.8: the ban on each shared primitive's import outside its
+        # owner is rendered from the project's shared registry, never written here.
+
+    dupl:
+      threshold: 60 # code.duplication.1
+
+    errcheck:
+      # go.errors.1, go.errors.3 (tests excluded below)
+      check-type-assertions: true
+      check-blank: true
+
+    exhaustive:
+      default-signifies-exhaustive: true # code.idioms.3 (tests excluded below)
+
+    forbidigo:
+      analyze-types: true # go.errors.3, go.concurrency.1, cli.config.3, cli.output.2, tests.isolation.6
+      forbid:
+        - pattern: ^panic$
+          msg: "go.errors.3: panic is for programmer errors; outside main and tests it needs an allow-list entry"
+        - pattern: ^os\.Exit$
+          msg: "go.errors.4: only main exits"
+        - pattern: ^log\.(Fatal|Fatalf|Fatalln)$
+          msg: "go.errors.4: only main exits"
+        - pattern: ^context\.(Background|TODO)$
+          msg: "go.concurrency.1: take the context from the caller"
+        - pattern: ^os\.(Getenv|LookupEnv|Environ)$
+          msg: "cli.config.3: read the environment in the config package"
+        - pattern: ^os\.(UserConfigDir|UserCacheDir|UserHomeDir)$
+          msg: "cli.config.5: folders come from the paths helper"
+        - pattern: ^fmt\.(Print|Printf|Println)$
+          msg: "cli.errors.3: write through the injected writer or the terminal module"
+        - pattern: ^os\.(Stdout|Stderr)$
+          msg: "cli.errors.3: write through the injected writer or the terminal module"
+        - pattern: ^json\.(NewEncoder|Marshal|MarshalIndent)$
+          pkg: ^encoding/json$
+          msg: "cli.output.2: JSON output is written by the root command only"
+        - pattern: ^os\.StartProcess$
+          msg: "cli.process.1: start programs through the runner"
+        - pattern: ^syscall\.(ForkExec|Exec|StartProcess)$
+          msg: "cli.process.1: start programs through the runner"
+        - pattern: ^runtime\.(GOOS|GOARCH)$
+          msg: "arch.ports.1, arch.ports.23: platform checks belong in the host layer"
+        - pattern: ^testing\.(T|B|F)\.(Skip|Skipf|SkipNow)$
+          msg: "tests.admission.5: a skip needs an allow-list entry and a reason"
+        - pattern: ^time\.Sleep$
+          msg: "tests.isolation.6: no sleep in a test; wait on a signal"
+        # arch.shared.8: the ban on each shared primitive's call outside its owner
+        # is rendered from the project's shared registry, never written here.
+        # The register (unix-socket-listen), for security: the umask is the
+        # process's, so a file another goroutine makes while it is changed takes
+        # the socket's mode; a socket's mode is set where it is made.
+        - pattern: ^(syscall|unix)\.Umask$
+          msg: "security: the umask is the whole process's, so a file made meanwhile takes another mode; a socket's mode is set where it is made, never through the umask (syscall.Umask, unix.Umask)"
+        # The register (peer-identity): peer reads the kernel through x/sys's
+        # named calls, so no file makes a raw system call of the Syscall family:
+        # Syscall, RawSyscall, each numbered and N form, their NoError forms,
+        # and AllThreadsSyscall and AllThreadsSyscall6, of syscall or of
+        # x/sys/unix. x/sys/windows has no Syscall of its own.
+        - pattern: ^(syscall|unix)\.(AllThreads|Raw)?Syscall(6|9|12|15|18|N)?(NoError)?$
+          msg: "security: no raw system call of the Syscall family in any file (Syscall, RawSyscall, their numbered, N and NoError forms, AllThreadsSyscall); peer reads the kernel through x/sys's named calls"
+        # The register (peer-identity): the other raw system call
+        # is Call on a DLL's proc, a Proc or a LazyProc of syscall or of
+        # x/sys/windows; analyze-types names it by its type, so the row sees
+        # it however the proc was reached. Two calls are excepted below, each
+        # by its file and the whole of its own line, so a second call in the
+        # same file is red: peer_windows.go's ImpersonateNamedPipeClient, which
+        # takes on the pipe client's token to read who it is, and
+        # peer_windows_test.go's CreateRestrictedToken, which makes the
+        # restricted token a test impersonates to dial as an account that is
+        # not its own. x/sys/windows v0.50.0 wraps neither: its
+        # zsyscall_windows.go is generated from the calls it lists, and these
+        # two are not among them.
+        - pattern: ^(syscall|windows)\.(Lazy)?Proc\.Call$
+          msg: "security (peer-identity): no raw system call through a DLL's proc (Call on a Proc or LazyProc, of syscall or x/sys/windows) in any file; the two x/sys does not wrap are excepted by their own source lines"
+        # The register (peer-identity): a Call row alone misses
+        # a Call through an embedded field or an interface, and a proc
+        # retargeted on an excepted line. So the proc's acquisition is red too,
+        # whatever then calls it: the DLL loaded or named (NewLazyDLL,
+        # NewLazySystemDLL, LoadDLL, MustLoadDLL, LoadLibrary, LoadLibraryEx),
+        # a proc taken from it (LazyDLL.NewProc, DLL.FindProc and
+        # DLL.MustFindProc and their ByOrdinal forms) or its address read
+        # (GetProcAddress and GetProcAddressByOrdinal), of syscall or
+        # x/sys/windows, in every file. The two acquisitions the Call row
+        # excepts are excepted below, each by its file and the whole of its
+        # own line, which names the DLL and the proc, so a proc retargeted
+        # there is red.
+        - pattern: ^(syscall|windows)\.(NewLazyDLL|NewLazySystemDLL|LoadDLL|MustLoadDLL|LoadLibrary|LoadLibraryEx|GetProcAddress|GetProcAddressByOrdinal|LazyDLL\.NewProc|DLL\.(Must)?FindProc(ByOrdinal)?)$
+          msg: "security (peer-identity): no DLL loaded or proc taken from one (NewLazyDLL, NewLazySystemDLL, LoadDLL, LoadLibrary, NewProc, FindProc, GetProcAddress and kin, of syscall or x/sys/windows) in any file; the two procs x/sys does not wrap are excepted by their own source lines"
+        # The two excepted procs are used on their own Call lines alone. There
+        # forbidigo names the whole selector (impersonateNamedPipeClient.Call),
+        # which the Call row holds by its line; anywhere else the variable
+        # stands alone (copied, embedded in a struct, held as an interface)
+        # and this row is red, so no other line calls either proc.
+        - pattern: ^(peer\.)?(impersonateNamedPipeClient|createRestrictedToken)$
+          msg: "security (peer-identity): an excepted proc (impersonateNamedPipeClient, createRestrictedToken) is used on its own Call line alone, never copied, embedded or held as an interface"
+        # The four types' exported fields (LazyDLL's Name and System, LazyProc's
+        # and Proc's Name, DLL's Name and Handle, Proc's Dll) can load a DLL or
+        # retarget a proc with no call above: LazyProc.Name is read at its
+        # first Find, so a write of impersonateNamedPipeClient.Name anywhere in
+        # peer would make its excepted Call line call another proc. Each field
+        # is red at every mention. The two procs'
+        # Addr and Find also pass the rows here; the address they give is
+        # called only by the Syscall family, which the raw-call row holds in
+        # every file, so that row closes this route and is not relaxed.
+        - pattern: ^(syscall|windows)\.(Lazy)?(DLL|Proc)\.(Name|System|Handle|Dll)$
+          msg: "security (peer-identity): no field of a DLL or a proc (Name, System, Handle, Dll of DLL, LazyDLL, Proc or LazyProc, of syscall or x/sys/windows) is read or written in any file"
+        # The types themselves are refused at each mention: a literal
+        # &windows.LazyDLL{...} loads a DLL with no call above, and its NewProc
+        # and Call, promoted through an embedding or called through an
+        # interface, go by another name. The two excepted lines name
+        # no type.
+        - pattern: ^(syscall|windows)\.(Lazy)?(DLL|Proc)$
+          msg: "security (peer-identity): no DLL or proc type (DLL, LazyDLL, Proc, LazyProc, of syscall or x/sys/windows) is named in any file, as a literal, a field, a parameter or an interface's return"
+        # The register (path-lock), for security: listen's lock file is opened
+        # by gofrs/flock with lockFlag, never following a link, and checked as
+        # a plain file; a hand flock or LockFileEx skips both.
+        - pattern: ^(syscall|unix)\.Flock$
+          msg: "security: a hand flock skips listen's lock open, which never follows a link, and its refusals; a lock file is held with gofrs/flock (syscall.Flock, unix.Flock)"
+        - pattern: ^windows\.LockFileEx$
+          msg: "security: a hand LockFileEx skips listen's lock open, which never follows a reparse point, and its refusals; a lock file is held with gofrs/flock (windows.LockFileEx)"
+        # The register (unix-socket-listen), for correctness: a passed socket
+        # comes from go-systemd's activation, which takes it only when
+        # LISTEN_PID is this process's, so no LISTEN_FDS is read by hand.
+        # Reading the environment through os is cli.config.3's row; this row
+        # holds the ways past it.
+        - pattern: ^(syscall|unix|windows)\.(Getenv|Environ)$
+          msg: "correctness: the environment is read through os alone, never syscall, unix or windows Getenv or Environ; a passed socket comes from go-systemd's activation, which checks LISTEN_PID"
+        # per-project (cli.errors.2, cli.look.4, cli.look.5, cli.output.5): the
+        # shared UI module's literals and constructors, for example
+        #   ^ui\.(Ending|Refusal)$, ^lipgloss\.Style\.(Padding|Margin|Width)$,
+        #   flag definitions of the module's flag names.
+        # per-project (arch.ports.6, arch.shared.8, cli.config.2): sibling names,
+        #   shared exports and config decodes named in rule data.
+
+    gocognit:
+      min-complexity: 20 # code.size.3 (tests excluded below)
+
+    gocritic:
+      # code.comments.3: commentedOutCode only.
+      disable-all: true
+      enabled-checks:
+        - commentedOutCode
+
+    gocyclo:
+      min-complexity: 30 # code.idioms.4
+
+    gomoddirectives:
+      # go.layout.3: no replace lines at all.
+      replace-local: false
+      replace-allow-list: []
+
+    gosec:
+      # supply.scans.3: every rule runs, G201, G202, G204 and G404 among them, and no
+      # includes or excludes list narrows it; an exclusion below names its rule
+      # ids, its paths and its reason (internal/contexts_test.go holds the four).
+      config:
+        global:
+          # cli.process.1, gates.exemptions.1: a #nosec comment silences
+          # nothing; a suppression is a nolint with its reason, counted.
+          nosec: true
+
+    govet:
+      enable:
+        - waitgroup # go.concurrency.2 (on top of the default analyzers, code.format.2)
+
+    iface:
+      enable: # arch.ports.10
+        - identical
+        - unused
+        - opaque
+
+    interfacebloat:
+      max: 10 # go.style.1
+
+    nolintlint:
+      # gates.exemptions.1, gates.exemptions.2
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
+
+    paralleltest:
+      # go.cycle.2, tests.runners.4: a test that runs alone is written
+      # //nolint:paralleltest // serial: <the process state it needs>; the
+      # project's suppression list holds the text, since nolintlint cannot.
+      ignore-missing: false
+      ignore-missing-subtests: false
+
+    revive:
+      rules:
+        - name: early-return # code.idioms.1
+        - name: indent-error-flow # code.idioms.1
+        - name: exported # code.naming.1 (stutter check on), code.comments.4
+        - name: var-naming # code.naming.1
+        - name: package-naming # arch.structure.7
+          arguments:
+            - check-extra-bad-name: true
+              user-defined-bad-names: [helpers, types, models, interfaces, base, other, misc]
+        - name: argument-limit # code.size.4
+          arguments: [6]
+        - name: deep-exit # go.errors.4
+        - name: datarace # go.concurrency.2
+        - name: waitgroup-by-value # go.concurrency.2
+        - name: forbidden-call-in-wg-go # go.concurrency.2
+
+    sloglint:
+      # go.logging.1, go.logging.2
+      no-global: all
+      static-msg: true
+      kv-only: true
+
+    thelper:
+      # go.style.5: a helper calls t.Helper first. Where the testing value sits
+      # in the parameters and what it is named are not the rule.
+      test: {begin: true, first: false, name: false}
+      benchmark: {begin: true, first: false, name: false}
+      tb: {begin: true, first: false, name: false}
+      fuzz: {begin: true, first: false, name: false}
+
+    staticcheck:
+      # code.format.2: all groups, the non-default ST checks off except
+      # ST1003, which code.naming.1 asks for. ST1005 stays on (go.errors.5 is
+      # not ruled yet; a project that keeps sentence-style errors excludes it).
+      checks:
+        - all
+        - -ST1000
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+
+  exclusions:
+    # code.comments.4: no exclusion presets, so the comments preset stays off.
+    presets: []
+    # cli.process.1, gates.exemptions.1: a generated-file header silences no
+    # linter; golangci-lint v2 reads one loosely by default and drops the whole
+    # file. A suppression is a nolint with its reason, counted.
+    generated: disable
+    # Keep this list last in the file: a project's own exclusion rules are
+    # list items appended below its overrides line.
+    rules:
+      # go.errors.1, code.idioms.3, code.size.3, code.duplication.1: non-test
+      # code only; a test's table of cases repeats by design.
+      - path: _test\.go$
+        linters: [dupl, errcheck, exhaustive, gocognit]
+      # supply.scans.3: a test reads and writes its own temp folders and testdata,
+      # builds its inputs from planted values, and plants credential-shaped strings
+      # that the secret scan reads with every file; G104 is errcheck's, as above.
+      - path: _test\.go$
+        linters: [gosec]
+        text: "G(101|104|115|122|301|302|304|306|703):"
+      # go.errors.3, go.errors.4: main and tests may panic and exit.
+      - path: (^|/)cmd/|_test\.go$
+        linters: [forbidigo]
+        text: "go\\.errors\\.[34]:"
+      # go.concurrency.1: a root context is made in main and in tests.
+      - path: (^|/)cmd/[^/]+/main\.go$|_test\.go$
+        linters: [forbidigo]
+        text: "go\\.concurrency\\.1:"
+      # cli.config.3: the config package and main read the environment; only
+      # the config package's own files, not a package below it.
+      # per-project: add the terminal module path.
+      - path: (^|/)cmd/[^/]+/main\.go$|(^|/)internal/config/[^/]+\.go$
+        linters: [forbidigo]
+        text: "cli\\.config\\.3:"
+      # cli.errors.3: main wires the process streams into run.
+      # per-project: add the terminal module path.
+      - path: (^|/)cmd/[^/]+/main\.go$
+        linters: [forbidigo]
+        text: "cli\\.errors\\.3:"
+      # cli.output.2: only the command path is checked: cmd/ and the command
+      # tree under internal/cli/.
+      # per-project: add the root command file.
+      - path-except: (^|/)cmd/|(^|/)internal/cli/
+        linters: [forbidigo]
+        text: "cli\\.output\\.2:"
+      # tests.admission.5, tests.isolation.6: test files only.
+      - path-except: _test\.go$
+        linters: [forbidigo]
+        text: "tests\\.(admission\\.5|isolation\\.6):"
+      # go-socket's own exclusions. Each names its reason, and the ticket that ends
+      # it where one does; the list only shrinks.
+      #
+      # Serve starts work that outlives a request on purpose (the idle timer and
+      # the grace); a request's context would end it with the request.
+      - path: ^listen/[^/]+\.go$
+        linters: [contextcheck]
+      # listen has no caller's context to take: Serve makes its own root, and
+      # Listen listens on a TCP address and asks a socket at its path whether a
+      # program answers there on its own, as its signature has it.
+      - path: ^listen/(listen|serve)\.go$
+        linters: [forbidigo]
+        text: "go\\.concurrency\\.1:"
+      # runtime.GOOS picks the Unix-only path or skips a test on a system it
+      # does not cover; a library's test has no adapter folder to move it to.
+      - path: ^listen/[^/]+_test\.go$
+        linters: [forbidigo]
+        text: "arch\\.ports\\.1, "
+      # a listen test reads the process environment: the markers that make the
+      # test binary a helper child, the LISTEN_FDS and LISTEN_PID of a socket a
+      # parent hands it, and the environment it hands the child; a library has
+      # no config package.
+      - path: ^listen/[^/]+_test\.go$
+        linters: [forbidigo]
+        text: "cli\\.config\\.3:"
+      # a listen test starts only the test binary again, or sh with a fixed line
+      # to hand it a socket; nothing it starts is read from outside the test.
+      - path: ^listen/[^/]+_test\.go$
+        linters: [gosec]
+        text: "G(204|702):"
+      # the test handler writes its own connection's local address and a mark
+      # from its own context to the test's client; nothing comes from outside.
+      - path: ^listen/serve_test\.go$
+        linters: [gosec]
+        text: "G705:"
+      # the listening child ends its own process when the parent test is done
+      # with it, with the code that says what Listen told it.
+      - path: ^listen/child_test\.go$
+        linters: [revive]
+        text: "deep-exit:"
+      # internal/cmd/testexec starts the test binary go test names to it
+      # with the arguments go test gives, and appends to the file the Taskfile
+      # names in GO_SOCKET_TEST_EXITS: both come from go test and the Taskfile,
+      # never from outside the tier.
+      - path: ^internal/cmd/testexec/run\.go$
+        linters: [gosec]
+        text: "G(204|304|702|703):"
+      # testexec prints to its stderr only what it could not record, or a
+      # binary's non-zero end; a stderr that takes no write leaves nowhere else
+      # to say it, and the binary's code is given either way.
+      - path: ^internal/cmd/testexec/run\.go$
+        linters: [errcheck]
+        text: "fmt\\.Fprint"
+      # testexec's test child stands in for a test binary: it prints its lines
+      # to its own stdout and stderr, as a test binary does.
+      - path: ^internal/cmd/testexec/run_test\.go$
+        linters: [forbidigo]
+        text: "cli\\.errors\\.3:"
+      # names kept as they are: ListenOption is the type of Listen's options,
+      # kept so though it stutters.
+      - path: ^listen/web\.go$
+        linters: [revive]
+        text: "listen\\.ListenOption .* stutters"
+      # PeerOf is the call's name, kept beside Peer and
+      # Peers so a program reads peer.PeerOf(c) as the peer of c.
+      - path: ^peer/peer\.go$
+        linters: [revive]
+        text: "peer\\.PeerOf .* stutters"
+      # serial: each starts child processes, and a fork while another test
+      # holds a lock file open holds that lock until the exec, so a parallel
+      # test would find its lock taken (each test's own comment says so).
+      - path: ^listen/listen_test\.go$
+        linters: [paralleltest]
+        text: "Test(ASocketWhoseProgramWasKilledIsTakenOver|TwoProgramsRacingForOnePathOneListens) missing the call to method parallel"
+      - path: ^listen/listen_unix_test\.go$
+        linters: [paralleltest]
+        text: "TestASocketHasItsModeAndGroupFromTheMomentItCanBeReached missing the call to method parallel"
+      - path: ^listen/activated_linux_test\.go$
+        linters: [paralleltest]
+        text: "Test(ActivatedKeepsTheOrderAndTheNames|ActivatedTakesTheNamedInTheirOrderAndClosesTheRest) missing the call to method parallel"
+      # serial: it starts a child process that holds a pipe, as the Unix
+      # child tests above do (its own comment says so).
+      - path: ^listen/pipe_windows_test\.go$
+        linters: [paralleltest]
+        text: "TestAPipeAlreadyAtTheNameIsRefusedWithErrHeld missing the call to method parallel"
+      # serial: t.Chdir moves the whole process, which no parallel test may
+      # share; the test checks that Close removes the path Listen made absolute.
+      - path: ^listen/remove_unix_test\.go$
+        linters: [paralleltest]
+        text: "TestARelativePathIsTheFolderListenWasCalledIn missing the call to method parallel"
+      # tests.admission.5: the skips allowed, each by its own line and reason.
+      # a system whose sun_path length the test does not hold.
+      - path: ^listen/listen_test\.go$
+        linters: [forbidigo]
+        source: "t\\.Skipf\\(\"no sun_path is written down here for"
+      # root connects to every socket, so a test of a socket this account may
+      # not connect to proves nothing as root.
+      - path: ^listen/listen_unix_test\.go$
+        linters: [forbidigo]
+        source: "t\\.Skip\\(\"root writes every file\"\\)"
+      # The register (peer-identity): the two calls through a
+      # DLL's proc that x/sys/windows does not wrap, each pinned to its file
+      # and to the whole of its own line, from the tab to the brace (and the
+      # test's nolint after it); the row's comment says what each is. A rule
+      # here names no line number, so a byte-for-byte copy of either whole
+      # line in the same file would be excepted too; any other call is red.
+      - path: ^peer/peer_windows\.go$
+        linters: [forbidigo]
+        text: "security \\(peer-identity\\): no raw system call through a DLL's proc"
+        source: "^\\tif r, _, err := impersonateNamedPipeClient\\.Call\\(uintptr\\(h\\)\\); r&0xffffffff == 0 \\{$"
+      - path: ^peer/peer_windows_test\.go$
+        linters: [forbidigo]
+        text: "security \\(peer-identity\\): no raw system call through a DLL's proc"
+        source: "^\\tif ok, _, err := createRestrictedToken\\.Call\\(uintptr\\(p\\), 0, uintptr\\(len\\(off\\)\\), offp, 0, 0, uintptr\\(len\\(only\\)\\), onlyp, uintptr\\(unsafe\\.Pointer\\(&r\\)\\)\\); ok&0xffffffff == 0 \\{ //nolint:gosec // G103: a proc x/sys does not wrap takes its pointers as uintptr, as peer's own does$"
+      # The register (peer-identity): the acquisitions of those
+      # two procs, each pinned to its file and to the whole of its own line,
+      # which names advapi32.dll and the proc; one line yields the DLL's and
+      # the proc's finding, and both are excepted. A proc retargeted, or a
+      # DLL other than advapi32.dll named, is red.
+      - path: ^peer/peer_windows\.go$
+        linters: [forbidigo]
+        text: "security \\(peer-identity\\): no DLL loaded or proc taken from one"
+        source: "^var impersonateNamedPipeClient = windows\\.NewLazySystemDLL\\(\"advapi32\\.dll\"\\)\\.NewProc\\(\"ImpersonateNamedPipeClient\"\\) //nolint:gochecknoglobals // arch\\.ports\\.12: a proc is loaded once, as x/sys keeps its own$"
+      - path: ^peer/peer_windows_test\.go$
+        linters: [forbidigo]
+        text: "security \\(peer-identity\\): no DLL loaded or proc taken from one"
+        source: "^var createRestrictedToken = windows\\.NewLazySystemDLL\\(\"advapi32\\.dll\"\\)\\.NewProc\\(\"CreateRestrictedToken\"\\) //nolint:gochecknoglobals // arch\\.ports\\.12: a proc is loaded once, as x/sys keeps its own$"

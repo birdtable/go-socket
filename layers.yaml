@@ -1,0 +1,51 @@
+# go-socket's layer table: the one place its packages and what they may import
+# are written. .golangci.yml's layer rows (depguard) hold the tree to it, on
+# every system's files and the tests: listen, peer and caller never import one
+# another, each library is imported by the package its row names alone, only
+# a test imports github.com/birdtable/go-testkit, the environment every
+# package's tests start from, and internal/cmd/measure and
+# internal/cmd/testexec import the standard library alone, their tests
+# included.
+# No program reads this file: each row's may and external are written into
+# those depguard rows by hand, so a row added or changed here changes its
+# rows there in the same commit.
+module: github.com/birdtable/go-socket
+
+layers:
+  - layer: leaf
+    packages:
+      - listen
+    may: []
+    external:
+      - github.com/bored-engineer/go-launchd
+      - github.com/coreos/go-systemd/v22/activation
+      - github.com/docker/go-connections/sockets
+      - github.com/gofrs/flock
+      - github.com/Microsoft/go-winio
+    holds: "the HTTP answer that costs nothing while idle"
+    why: "socket activation, by systemd and on macOS by launchd (go-launchd, in activated_darwin.go alone, as its launch_activate_socket call needs assembly this tree refuses), a socket bound with its access before it listens, and a lock file are the reviewed libraries it wraps; on Windows its own listener is go-winio's named pipe, made with its access list, in pipe_windows.go alone; nothing else is needed"
+  - layer: leaf
+    packages:
+      - peer
+    may: []
+    external:
+      - golang.org/x/sys/unix
+      - golang.org/x/sys/windows
+      - github.com/Microsoft/go-winio
+    holds: "who is at the other end of a connection"
+    why: "the peer's credentials need the socket option x/sys/unix names; on Windows the pipe and its dial at a chosen level are go-winio's, and the token and the access list are read through x/sys/windows; nothing else is needed"
+  - layer: leaf
+    packages:
+      - caller
+    may: []
+    external: []
+    holds: "who the caller of an HTTP request is, as a front the program trusts wrote it"
+    why: "the headers are read with the standard library's RFC 2047 decoder and encoding/json/v2; nothing else is needed"
+  - layer: repo tasks
+    packages:
+      - internal/cmd/measure
+      - internal/cmd/testexec
+    may: []
+    external: []
+    holds: "the programs the Taskfile runs: one prints the size, one starts each test binary for go test and records how it ended"
+    why: "a task of the repo imports only the standard library, and no package imports it"

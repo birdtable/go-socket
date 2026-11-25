@@ -1,0 +1,15 @@
+listen	TestAPathWhoseLockAnotherProgramHoldsIsRefusedAndLeft	linux,darwin	Listen refuses a socket path whose lock file another program holds with ErrHeld, and leaves what is at the path as it was.
+listen	TestAPipeAlreadyAtTheNameIsRefusedWithErrHeld	windows	Listen refuses a name where a named pipe already is, whoever made it, with ErrHeld, and never joins that pipe.
+listen	TestAPipesAccessListIsTheAccountAndSystemAlone	windows	A named pipe Listen makes is owned by the account the program runs as, and that account and SYSTEM alone may open it, with nothing inherited into its access list.
+listen	TestASocketARunBeforeLeftIsReplacedOnlyWhereTheCallerSays	linux,darwin	Listen refuses a socket path where a socket refuses connections with ErrMaybeBusy and leaves it, and replaces it only when the caller gives ReplaceEvenIfBusy.
+listen	TestASocketHasItsModeAndGroupFromTheMomentItCanBeReached	linux,darwin	A socket Listen makes has its mode, 0600 unless SocketMode gives another, and the group SocketGroup names, from the moment any process can connect to it, whatever the umask.
+listen	TestASocketThatAnswersIsRefusedWithErrHeld	linux,darwin	Listen refuses a socket path where a socket answers a connection with ErrHeld, and leaves that socket listening.
+listen	TestSomethingAtThePathThatIsNotASocketIsLeft	linux,darwin	Listen refuses a path that holds something other than a socket, and leaves it as it was.
+peer	TestListenerRefusesAPeerWhoseUserCannotBeRead	linux,darwin	Listener refuses at accept a connection whose peer's user PeerOf cannot read, whatever principals it trusts.
+peer	TestListenerRefusesAStrangerBeforeAByteIsRead	linux,darwin	Listener closes a connection whose peer is not among the principals it trusts before the server reads a byte of it.
+peer	TestPeerOfAConnectionThatIsNotAPipeCannotSay	windows	PeerOf is ErrCannotSay on Windows for a connection that is not a named pipe's.
+peer	TestPeerOfAPipeIsItsClientsSIDBeforeAByteIsRead	windows	PeerOf on the listening side of a named pipe is the client's account SID, read before a byte of the connection is.
+peer	TestPeerOfIsTheUserAtTheOtherEnd	linux,darwin	PeerOf on a unix socket is the user of the process at the other end, and ErrCannotSay for a TCP connection or a connection that is no socket.
+peer	TestPeerOfRefusesAUnixSocketWithNoPeer	linux,darwin	PeerOf names no user for a unix socket the kernel recorded no peer for: a datagram socket, or a stream socket that never connected.
+peer	TestPeerOfTheDiallingSideIsThePipesOwner	windows	PeerOf on the dialling side of a named pipe is the account that owns the pipe.
+peer	TestTheGateWorksOverAPipeListener	windows	Listener over a named pipe hands on a connection from an account its principals list by SID, and closes any other, telling refused that SID.

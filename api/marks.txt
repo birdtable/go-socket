@@ -1,0 +1,4 @@
+# The exported names that are not experimental, one a line, tab-separated: the package as a folder
+# from the module's root (. for the root), the name as go doc takes it (Name, or Type.Method), and
+# its mark. Every name not listed is experimental and may still change before v1.0.0. None is
+# listed today. task api fails on a line go doc cannot find, and on one whose mark is experimental.

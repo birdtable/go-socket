@@ -1,0 +1,47 @@
+name: Bug
+description: Something in go-socket does not do what its documentation says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Found a security problem? Please don't open an issue: report it privately, as
+        SECURITY.md describes.
+  - type: input
+    id: version
+    attributes:
+      label: Library version
+      description: The go-socket version or commit in your go.mod.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: go
+    attributes:
+      label: Go version
+      description: What `go version` prints.
+      placeholder: go version go1.27.4 linux/amd64
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: The operating system and its version, and the architecture.
+      placeholder: Debian 13, amd64
+    validations:
+      required: true
+  - type: textarea
+    id: program
+    attributes:
+      label: The shortest program that shows it
+      description: A complete program, as short as it can be and still show the bug.
+      render: go
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true

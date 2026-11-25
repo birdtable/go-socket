@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t d">
+  <title id="t">go-socket</title>
+  <desc id="d">A plug, its pins in coral.</desc>
+  <rect width="256" height="256" rx="56" fill="#22264A"/><g transform="translate(128 128) scale(1.6) translate(-179 -149)"><path d="M166 108 V132 M192 108 V132" fill="none" stroke="#E8735A" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/><rect x="150" y="132" width="58" height="40" rx="12" fill="none" stroke="#FFF6EC" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/><path d="M179 172 V190" fill="none" stroke="#FFF6EC" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/></g>
+</svg>

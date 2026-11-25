@@ -1,0 +1,38 @@
+# Each tier's budget and its measured floor, in seconds, read by hatch budget in Taskfile.yml's
+# budget task.
+#
+# The budget is a ceiling: commit 2 s, push 10 s, release 15 s on a darwin-arm64 host, and 60 s
+# for the release tier on a Linux or Windows amd64 machine (GITHUB_ACTIONS unset); it stands
+# over any rule of floor times a factor, pre-push's too. A tier past its budget
+# on that kind of host fails, but a pre-commit or pre-push that started at a 1-minute load above
+# 15 passes, saying so. On any other kind of host,
+# and on a hosted runner (GITHUB_ACTIONS set), no budget applies and the time is printed; a
+# hosted run is held by its job's timeout.
+#
+# The floor is the least of three runs of the tier from a fresh clone, kept
+# beside its budget; the load the run started at is in the comment above it.
+#
+# The shape is narrow: a comment line, or a key, a colon and a number. hatch reads a row as the
+# budget task's --row says, a key of lower-case letters and dashes and a whole number of seconds,
+# so a floor, with its decimals, is no row to it. host is {{OS}}-{{ARCH}} as go-task says them.
+host: darwin-arm64
+# The least of 0.44, 0.42 and 0.43 s on 17 Nov 2026, at a start load of 40.
+pre-commit-floor: 0.42
+pre-commit-budget: 2
+# The least of 4.79, 4.71 and 4.64 s on 21 Nov 2026, at a start load of 9.3, 13.0 and
+# 10.7: each a run after the clone's first, so it skips the members whose inputs are as they
+# were at their last pass. It was 5.64 on 20 Nov 2026, and 6.75 on 18 Nov,
+# until the root package built go-task once and its hatch rows' race binaries stopped pausing at
+# exit.
+# A clone's first run, which has nothing passed yet and so runs every member, took 8, 8 and
+# 8.41 s on 21 Nov 2026, at a start load of 11.0, 14.2 and 14.2, each in a clone of its
+# own (the first two are the budget's whole seconds): under the budget, where on 20 Nov it took
+# 12.80, 12.94 and 12.34 s. pre-push's race run now exits without the race detector's pause, and
+# listen's two longest race rows run four racers at once, every round kept.
+# The 10 s budget stands, and a push over it is a speed bug.
+pre-push-floor: 4.64
+pre-push-budget: 10
+# The least of 8.54, 8.33 and 8.35 s on 17 Nov 2026, at a start load of 29 to 36.
+release-floor: 8.33
+release-budget: 15
+release-budget-session: 60

@@ -1,0 +1,5 @@
+go test fuzz v1
+string("=?utf-8?q?person@example.com?=")
+string("")
+string("")
+byte('\x00')

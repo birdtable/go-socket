@@ -1,0 +1,7 @@
+# Test binaries and profiles a run may leave behind.
+*.test
+*.out
+# A Task run's own state.
+/.task/
+# What a failed test member keeps: go test's json with hatch's verdict, and the stderr.
+/build/
