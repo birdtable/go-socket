@@ -32,6 +32,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Every commit and tag: internal/contract's test finds the last tag with git describe,
+          # and a one-commit clone holds none, so it would compare against nothing.
+          fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -39,6 +42,10 @@ jobs:
       # Fetches every module go.mod names, for every system: one test builds for each with no proxy.
       - name: go mod download
         run: go mod download
+      # -mod=mod would let an untidy go.mod pass the steps after this. The root module alone: no
+      # program imports the tools/*.mod modules, and they can't resolve from the public proxy yet (#2).
+      - name: go mod tidy -diff
+        run: go mod tidy -diff
       - name: go vet
         run: go vet ./...
       - name: go test
