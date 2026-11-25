@@ -153,6 +153,27 @@ try {
 	return lines[0], lines[1], lines[2]
 }
 
+// fullSID is who, a SID as SDDL writes it, as the full S-1-... string. SDDL writes some SIDs by
+// an alias: SY for SYSTEM, and LA for the machine's built-in Administrator, which GitHub's
+// Windows runners run as. Windows' own ConvertStringSidToSid reads either, and an alias for a
+// group, BA or WD, gives that group's SID, never the account's.
+//
+// What it costs when this fails: the account's own entry, written LA, reads as a stranger's, and
+// the test is red on a pipe whose list is right; or the test compares aliases, and passes a list
+// a group's alias is in.
+func fullSID(t *testing.T, who string) string {
+	t.Helper()
+	sid, err := syscall.StringToSid(who)
+	if err != nil {
+		t.Fatalf("%q is neither a SID nor an alias Windows reads: %v", who, err)
+	}
+	s, err := sid.String()
+	if err != nil {
+		t.Fatalf("the SID %q has no string: %v", who, err)
+	}
+	return s
+}
+
 // entry is one access list entry, as SDDL writes it.
 type entry struct {
 	kind, flags string
@@ -214,7 +235,7 @@ func TestAPipesAccessListIsTheAccountAndSystemAlone(t *testing.T) {
 	defer l.Close()
 	holding(t, l)
 	me, owner, dacl := readBack(t, name)
-	if owner != "O:"+me {
+	if who, ok := strings.CutPrefix(owner, "O:"); !ok || fullSID(t, who) != me {
 		t.Errorf("the pipe's owner is %s, and want the account, O:%s", owner, me)
 	}
 	flags, es, err := entries(dacl)
@@ -224,7 +245,10 @@ func TestAPipesAccessListIsTheAccountAndSystemAlone(t *testing.T) {
 	if !strings.Contains(flags, "P") || strings.Contains(flags, "AI") {
 		t.Errorf("the pipe's list %s is not protected, and want P", dacl)
 	}
-	want := []entry{{kind: "A", rights: 0x1f01ff, who: "SY"}, {kind: "A", rights: 0x12019f, who: me}}
+	for i := range es {
+		es[i].who = fullSID(t, es[i].who)
+	}
+	want := []entry{{kind: "A", rights: 0x1f01ff, who: fullSID(t, "SY")}, {kind: "A", rights: 0x12019f, who: me}}
 	key := func(e entry) string { return e.who }
 	slices.SortFunc(es, func(a, b entry) int { return strings.Compare(key(a), key(b)) })
 	slices.SortFunc(want, func(a, b entry) int { return strings.Compare(key(a), key(b)) })
