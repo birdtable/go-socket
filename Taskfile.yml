@@ -668,14 +668,29 @@ tasks:
         timeout: 1m
 
   gorelease:
-    desc: The API against the last tag, for VERSION.
+    desc: "The API against the last tag, for VERSION; where git describe finds no v tag below VERSION, VERSION's form alone (-base=none)."
     env:
       VERSION: '{{.VERSION}}'
     cmds:
       - task: version
         vars:
           VERSION: '{{.VERSION}}'
-      - cmd: '{{.GORELEASE}} -version="$VERSION"'
+      # gorelease looks for its base among the module's versions below VERSION, and with none it
+      # stops ("could not find base version"). So where git describe finds no v tag below VERSION
+      # in HEAD's history, as api says "no tag yet", it takes -base=none, which checks VERSION's
+      # form and compares nothing. A shallow clone may hold no tag at all, so it is red, as in api,
+      # not "no tag yet". VERSION itself is left out, so a run at the tag finds the one before it.
+      - cmd: |
+          if [ "$(git rev-parse --is-shallow-repository)" != false ]; then
+            echo "gorelease: the repository is a shallow clone, so the last tag cannot be told from no tag; fetch it whole (git fetch --unshallow --tags)" >&2
+            exit 1
+          fi
+          if git describe --tags --abbrev=0 --match 'v*' --exclude "$VERSION" HEAD > /dev/null 2>&1; then
+            {{.GORELEASE}} -version="$VERSION"
+          else
+            echo "gorelease: no tag below $VERSION yet, so no base to compare with; $VERSION's form is checked alone"
+            {{.GORELEASE}} -base=none -version="$VERSION"
+          fi
         timeout: 5m
 
   changelog:
