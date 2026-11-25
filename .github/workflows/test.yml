@@ -1,6 +1,6 @@
 # Runs go vet and go test on GitHub's hosted runners, on Linux, macOS and Windows, for every pull
 # request, every push to main, and by hand. It holds no secret, and its token reads the repository's
-# contents alone. Every module is fetched through the public Go module proxy, as a program that
+# contents alone. Every module is fetched through the public Go module proxy alone, as a program that
 # imports go-socket fetches them, and nothing is kept in the Actions cache. go-socket is one module,
 # at the root; the modules under tools/ pin the developer tools and no program imports them.
 name: test
@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 30
     env:
       GOFLAGS: -mod=mod
-      GOPROXY: https://proxy.golang.org,direct
+      GOPROXY: https://proxy.golang.org
     defaults:
       run:
         shell: bash
@@ -42,5 +42,33 @@ jobs:
       - name: go vet
         run: go vet ./...
       - name: go test
-        # These four run the repo's own task tooling through tools/*.mod, which can't resolve from the public proxy until those modules have public tags (#2).
-        run: go test -skip '^(TestATestMemberIsJudgedByHatchTests|TestEachTierEndsInItsBudget|TestTheBudgetHoldsEachTier|TestWarmBuildsAndRunsNothing)$' ./...
+        # The race detector needs cgo, and so a C compiler. Linux and macOS always race; Windows races
+        # when go finds one, and runs without -race otherwise, which the counts step says.
+        # The four -skip names run the repo's own task tooling through tools/*.mod, which can't resolve from the public proxy until those modules have public tags (#2).
+        run: |
+          race=-race
+          if [ "$RUNNER_OS" = Windows ] && [ "$(go env CGO_ENABLED)" != 1 ]; then race=; fi
+          echo "${race:-none}" > "$RUNNER_TEMP/race"
+          go test -json $race -shuffle=on -count=1 -skip '^(TestATestMemberIsJudgedByHatchTests|TestEachTierEndsInItsBudget|TestTheBudgetHoldsEachTier|TestWarmBuildsAndRunsNothing)$' ./... > "$RUNNER_TEMP/test.json"
+      # Counts the passed, failed and skipped tests and subtests, writes them to the job summary and
+      # the log, prints what each failed test wrote, and fails if any test failed or was skipped, or
+      # none passed. A name -skip leaves out never runs, so it counts as nothing.
+      - name: test counts
+        if: ${{ !cancelled() }}
+        run: |
+          j="$RUNNER_TEMP/test.json"
+          if [ ! -s "$j" ]; then echo "go test wrote no results"; exit 1; fi
+          count() { jq -s --arg a "$1" '[.[] | select(.Test != null and .Action == $a)] | length' "$j" | tr -d '\r'; }
+          passed=$(count pass); failed=$(count fail); skipped=$(count skip)
+          if [ "$(cat "$RUNNER_TEMP/race")" = none ]; then race="without -race: go finds no C compiler for cgo here"; else race="with -race"; fi
+          line="$RUNNER_OS: $passed passed, $failed failed, $skipped skipped, $race, -shuffle=on -count=1"
+          echo "$line"
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          jq -j 'select(.Action == "build-output") | .Output' "$j"
+          jq -sj '[.[] | select(.Action == "fail") | {Package, Test}] as $f | .[] | select(.Action == "output" and ({Package, Test} as $k | any($f[]; . == $k))) | .Output' "$j"
+          if [ "$skipped" != 0 ]; then
+            echo "skipped, which this workflow allows none of:"
+            jq -r 'select(.Test != null and .Action == "skip") | .Package + " " + .Test' "$j"
+            exit 1
+          fi
+          if [ "$failed" != 0 ] || [ "$passed" = 0 ]; then exit 1; fi
