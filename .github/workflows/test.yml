@@ -1,15 +1,23 @@
-# Runs go vet and go test on GitHub's hosted runners, on Linux, macOS and Windows, for every pull
-# request, every push to main, and by hand. It holds no secret, and its token reads the repository's
-# contents alone. Every module is fetched through the public Go module proxy alone, as a program that
-# imports go-socket fetches them, and nothing is kept in the Actions cache. go-socket is one module,
-# at the root; the modules under tools/ pin the developer tools and no program imports them.
+# Runs go vet, go test, lint, the API check and the vulnerability check on GitHub's hosted runners:
+# on Linux and Windows for every pull request, and on Linux, Windows and macOS for every push to main,
+# every v tag and by hand. A newer run of one ref cancels the one still going. It holds no secret,
+# and its token reads the repository's contents alone. Every module is fetched through the public Go
+# module proxy alone, as a program that imports go-socket fetches them, and nothing is kept in the
+# Actions cache; govulncheck reads the Go vulnerability database as well. go-socket is one module, at
+# the root; the modules under tools/ pin the developer tools and no program imports them.
 name: test
 
 on:
   pull_request:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+# One run per ref: a push to a pull request's branch, or to main, cancels that ref's run still going.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -19,7 +27,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # macOS on a push to main, a v tag and a run by hand alone: a pull request runs Linux and
+        # Windows. A macOS job the hosted pool never gives a runner ends cancelled with no step run;
+        # it wants a rerun, not a debug.
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest", "windows-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "macos-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -80,3 +91,31 @@ jobs:
             exit 1
           fi
           if [ "$failed" != 0 ] || [ "$passed" = 0 ]; then exit 1; fi
+      # lint, api and vuln are the tiers' own members, run through the pinned go-task as the tiers run
+      # them, so CI and the local tiers hold the same checks: lint reads every system in the Taskfile's
+      # SYSTEMS, api holds the surface against the last tag and between the systems, and vuln runs
+      # govulncheck. Each member alone, never a tier: a tier ends in its wall-clock budget, which
+      # measures the runner, not the code. Each runs whatever came before, so each result shows, and
+      # writes it to the job summary. --force: a member that reads only the tree skips when its
+      # checksum under .task matches, and a run here must never take a pass it did not see.
+      - name: lint
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0; go tool -modfile=tools/task.mod task --force lint || rc=$?
+          if [ "$rc" = 0 ]; then r=pass; else r="fail, exit $rc"; fi
+          echo "$RUNNER_OS lint: $r" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: api
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0; go tool -modfile=tools/task.mod task --force api || rc=$?
+          if [ "$rc" = 0 ]; then r=pass; else r="fail, exit $rc"; fi
+          echo "$RUNNER_OS api: $r" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: vuln
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0; go tool -modfile=tools/task.mod task --force vuln || rc=$?
+          if [ "$rc" = 0 ]; then r=pass; else r="fail, exit $rc"; fi
+          echo "$RUNNER_OS vuln: $r" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
