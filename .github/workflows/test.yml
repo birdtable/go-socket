@@ -42,8 +42,10 @@ jobs:
       # Fetches every module go.mod names, for every system: one test builds for each with no proxy.
       - name: go mod download
         run: go mod download
-      # -mod=mod would let an untidy go.mod pass the steps after this. The root module alone: no
-      # program imports the tools/*.mod modules, and they can't resolve from the public proxy yet (#2).
+      # -mod=mod would let an untidy go.mod pass the steps after this. The root module alone: go mod
+      # tidy -modfile=tools/<tool>.mod would add the library's own requirements to that tool's graph,
+      # which the Taskfile keeps apart, so each tools/*.mod holds what go get -tool writes into an
+      # empty modfile instead.
       - name: go mod tidy -diff
         run: go mod tidy -diff
       - name: go vet
@@ -51,15 +53,14 @@ jobs:
       - name: go test
         # The race detector needs cgo, and so a C compiler. Linux and macOS always race; Windows races
         # when go finds one, and runs without -race otherwise, which the counts step says.
-        # The four -skip names run the repo's own task tooling through tools/*.mod, which can't resolve from the public proxy until those modules have public tags (#2).
         run: |
           race=-race
           if [ "$RUNNER_OS" = Windows ] && [ "$(go env CGO_ENABLED)" != 1 ]; then race=; fi
           echo "${race:-none}" > "$RUNNER_TEMP/race"
-          go test -json $race -shuffle=on -count=1 -skip '^(TestATestMemberIsJudgedByHatchTests|TestEachTierEndsInItsBudget|TestTheBudgetHoldsEachTier|TestWarmBuildsAndRunsNothing)$' ./... > "$RUNNER_TEMP/test.json"
+          go test -json $race -shuffle=on -count=1 ./... > "$RUNNER_TEMP/test.json"
       # Counts the passed, failed and skipped tests and subtests, writes them to the job summary and
       # the log, prints what each failed test wrote, and fails if any test failed or was skipped, or
-      # none passed. A name -skip leaves out never runs, so it counts as nothing.
+      # none passed.
       - name: test counts
         if: ${{ !cancelled() }}
         run: |
