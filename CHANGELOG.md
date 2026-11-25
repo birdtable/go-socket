@@ -21,6 +21,7 @@ v0.6.3 changes no code in a package a program imports: no call or behaviour chan
 
 ### Removed
 * `api/proved.txt` and its check are gone. A release is proved instead by those GitHub Actions runs on Linux, macOS and Windows at the commit it is tagged from, with the release tier on macOS at the same commit, and these notes name the three systems. `api/contract.txt` and its check are unchanged.
+* The release workflow run by hand, `.github/workflows/release.yml`, is gone. It was built to fetch private modules, and nothing this repository builds needs it. GitHub Actions here now runs only actions pinned by full commit sha, and a workflow's token only reads.
 
 Proved on macOS (arm64), Linux (amd64) and Windows (amd64): `go vet`, and `go test` with the race detector in shuffled order, ran green on each, in GitHub Actions, at the commit this tag names, with no test skipped. Four tests of the repository's own tooling, which those runs leave out until its tools resolve from the public module proxy, ran in the release tier on macOS at the same commit, with lint for every system, the API check, the tidy check and the vulnerability scan.
 
