@@ -192,8 +192,8 @@ picks:
     sources: []
   - item: "tool: hatch"
     register_key: "tool:hatch"
-    job: "judge the tests in the test member (a failure, a skip or no test is red), and hold each tier to its budget in gate/budgets.yaml"
-    scope: "v0.2.0; every value it judges by is a flag in Taskfile.yml"
+    job: "judge the tests in the test member (a failure, a skip or no test is red), hold pre-push to its CPU limit with a wall-time hang guard (hatch budget --cpu), and hold pre-commit and release to their budgets in gate/budgets.yaml"
+    scope: "v0.7.0; every value it judges by is a flag in Taskfile.yml"
     ban: "none: review only (the consumer's config check reads the repo's config)"
     banned_calls: []
     pattern: "test2json|json:\"Action\"|\"-json\"|getloadavg|vm\\.loadavg"

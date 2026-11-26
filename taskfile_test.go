@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -407,16 +408,16 @@ func TestPrePushTakesTestsFromTheCacheAndReleaseRunsEveryOne(t *testing.T) {
 	type run struct{ flags, skip, race string }
 	alone := funcName(TestTheVersionCheckRefusesAnythingButOneTag)
 	wants := map[string]run{
-		"test":         {"", "^(" + alone + "|" + funcName(TestWarmBuildsAndRunsNothing) + ")$", "atexit_sleep_ms=0"},
+		"test":         {"", "^(" + alone + "|" + funcName(TestWarmBuildsAndRunsNothing) + "|" + funcName(TestThePushTiersWallTimeIsOnlyAHangGuard) + ")$", "atexit_sleep_ms=0"},
 		"test-release": {"-count=1 -shuffle=on", "^" + alone + "$", ""},
 	}
 	// Each command line ends in the caller's two variables, which its environment repeats.
 	for name, dry := range map[string]func(context.Context) *exec.Cmd{
 		"pre-push's": func(ctx context.Context) *exec.Cmd {
-			return toolTask(ctx, "--dry", "pre-push", "release", "VERSION=v0.1.1", "TIER=pre-push", "TASK=test")
+			return toolTask(ctx, "--dry", "pre-push-members", "release", "VERSION=v0.1.1", "TIER=pre-push", "TASK=test")
 		},
 		"release's": func(ctx context.Context) *exec.Cmd {
-			return toolTask(ctx, "--dry", "pre-push", "release", "VERSION=v0.1.1", "TIER=release", "TASK=test-release")
+			return toolTask(ctx, "--dry", "pre-push-members", "release", "VERSION=v0.1.1", "TIER=release", "TASK=test-release")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -427,7 +428,7 @@ func TestPrePushTakesTestsFromTheCacheAndReleaseRunsEveryOne(t *testing.T) {
 			cmd.Env = append(cmd.Env, caller...)
 			out, err := toolOutput(cmd)
 			if err != nil {
-				t.Fatalf("task --dry pre-push release, %q: %v:\n%s", caller, err, out)
+				t.Fatalf("task --dry pre-push-members release, %q: %v:\n%s", caller, err, out)
 			}
 			runs := map[string][]run{}
 			for _, m := range regexp.MustCompile(`(?m)^task: \[([a-z-]+)\] flags='([^']*)'; skip='([^']*)'; race='([^']*)'\r?\n([^\r\n]*?)\r?$`).FindAllStringSubmatch(string(out), -1) {
@@ -689,62 +690,31 @@ func saysNoHistory(out []byte) bool {
 	return false
 }
 
-// TestTheBudgetHoldsEachTier runs Taskfile.yml's budget task, hatch budget's call,
-// through a Taskfile that includes it, in a folder whose gate/budgets.yaml is
-// this tree's with its host set to the one the test runs on, so the budgets hold here, and with
-// hatch's modfile. The wrapper's end calls budget with the TIER, START and LOAD given; its
-// pre-push and release are the tiers' own vars and budget calls, read from Taskfile.yml, with no
-// member between, so a row within its budget is timed from a start the tier read. A tier within
-// its budget passes; a pre-commit or pre-push past its budget passes when its start load is above
-// 15, saying the load forgives it, and fails at 15 or with no load read; a release past its budget fails at
-// any load; a start in the future, or none, or not a number, fails; on a host the
-// budgets do not name, the time is printed and nothing fails. A tier run with START, LOAD and
-// TIER in its environment keeps what it measured, as go-task takes a task's own var over the
-// environment's. Two runs of one tier at once in one folder each keep their own verdict, and
-// leave the folder as it was.
+// TestTheBudgetHoldsEachTier runs Taskfile.yml's budget task, hatch budget's call, through a
+// Taskfile that includes it (budgetRig), in a folder whose gate/budgets.yaml is this tree's with
+// its host set to the one the test runs on, so the budgets hold here. The wrapper's end calls
+// budget with the TIER, START and LOAD given; its pre-push and release are the tiers' own vars and
+// budget calls, read from Taskfile.yml, and its pre-push-members is one command a row gives.
 //
-// What it costs when this fails: a tier past its budget passes, or one within it fails; or a run
+// pre-push is judged by its CPU time: budget runs its members under hatch budget --cpu, and they
+// pass within pre-push-cpu-limit, saying the CPU time they used, and fail over it, or when they
+// fail; a budgets file with no CPU row, or two, is refused. Past its wall budget pre-push passes
+// on its CPU time at any load, and no load forgives it anything. On a host the budgets do not
+// name, budget runs the members and prints the time: members that pass pass, and members that
+// fail fail. pre-commit and release are judged by their wall time: within their budget they pass;
+// a pre-commit past its budget passes when its start load is above 15, saying the load forgives
+// it, and fails at 15 or with no load read; a release past its budget fails at any load. A start
+// in the future, or none, or not a number, fails. A tier run with START, LOAD and TIER in its
+// environment keeps what it measured, as go-task takes a task's own var over the environment's.
+// Two runs of one tier at once in one folder each keep their own verdict, and leave the folder as
+// it was.
+//
+// What it costs when this fails: a push over its CPU limit passes, or one within it fails, or a
+// push whose members fail passes; a tier past its budget passes, or one within it fails; or a run
 // reads another's start, or the caller's.
 func TestTheBudgetHoldsEachTier(t *testing.T) {
 	t.Parallel()
-	wrapper, here, elsewhere, goLine := budgetWrapper(t)
-	bin := taskBin(t)
-	// folder makes a folder with the wrapper, the budgets given, a go.mod and hatch's modfile.
-	folder := func(t *testing.T, budgets string) string {
-		t.Helper()
-		dir := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(dir, "gate"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(filepath.Join(dir, "tools"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		for name, body := range map[string]string{
-			"Taskfile.yml":                        wrapper,
-			filepath.Join("gate", "budgets.yaml"): budgets,
-			"go.mod":                              "module example.invalid/budget\n\n" + goLine + "\n",
-		} {
-			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		for _, name := range []string{filepath.Join("tools", "hatch.mod"), filepath.Join("tools", "hatch.sum")} {
-			if err := copyFile(name, filepath.Join(dir, name)); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return dir
-	}
-	// run runs the wrapper with args in dir, GITHUB_ACTIONS taken out of its environment and env
-	// put in.
-	run := func(t *testing.T, dir string, args []string, env ...string) ([]byte, error) {
-		t.Helper()
-		cmd := goTask(t, bin, args...)
-		cmd.Dir = dir
-		isolate(cmd)
-		cmd.Env = append(slices.DeleteFunc(cmd.Env, func(kv string) bool { return strings.HasPrefix(kv, "GITHUB_ACTIONS=") }), env...)
-		return cmd.CombinedOutput()
-	}
+	r := newBudgetRig(t)
 	// end is the wrapper's end for tier, started ago seconds back at load.
 	end := func(tier string, ago int64, load string) []string {
 		return []string{"end", "TIER=" + tier, "START=" + strconv.FormatInt(time.Now().Unix()-ago, 10), "LOAD=" + load}
@@ -754,37 +724,61 @@ func TestTheBudgetHoldsEachTier(t *testing.T) {
 		return `(?m)^budget: ` + tier + `-budget is over budget, the load forgives it: load 16 before the ` + tier + `, above the limit of 15\r?$`
 	}
 	over := func(tier string) string { return `(?m)^hatch budget: ` + tier + `-budget is over its budget: ` }
-	twice := here + "pre-push-budget: 16\n"
+	cpuRow := regexp.MustCompile(`\npre-push-cpu-limit: [0-9]+\n`)
+	if n := len(cpuRow.FindAllString(r.here, -1)); n != 1 {
+		t.Fatalf("gate/budgets.yaml has %d pre-push-cpu-limit rows, and want one:\n%s", n, r.here)
+	}
+	cpuZero := cpuRow.ReplaceAllLiteralString(r.here, "\npre-push-cpu-limit: 0\n")
+	noCPU := cpuRow.ReplaceAllLiteralString(r.here, "\n")
+	twice := r.here + "pre-push-budget: 16\n"
+	cpuTwice := r.here + "pre-push-cpu-limit: 1600\n"
+	const (
+		after   = `(?m)^hatch budget: pre-push: --since [0-9]+ is [0-9]+ s after now`
+		failed  = `(?m)^task: Failed to run task "pre-push-members": exit status 1\r?$`
+		noRow   = `(?m)^pre-push took [0-9]+ s; no budget for this kind of host \([a-z0-9]+-[a-z0-9]+\), so none applies\r?$`
+		pastFew = `(?m)^budget: pre-push is over its wall limit of 10 s, and passes or fails on its CPU time alone`
+	)
 
 	for _, c := range []struct {
 		name, budgets string
-		args          []string
-		pass          bool
+		// members is the one command of the wrapper's pre-push-members; none is true.
+		members string
+		args    []string
+		pass    bool
 		// want is what the run must say.
 		want string
 	}{
-		{"pre-push from its own start", here, []string{"pre-push"}, true, within("pre-push")},
-		{"release from its own start", here, []string{"release"}, true, within("release")},
-		{"pre-commit 1000 s ago at load 16", here, end("pre-commit", 1000, "16"), true, forgiven("pre-commit")},
-		{"pre-push 1000 s ago at load 16", here, end("pre-push", 1000, "16"), true, forgiven("pre-push")},
-		{"pre-commit 1000 s ago at load 15", here, end("pre-commit", 1000, "15"), false, over("pre-commit")},
-		{"pre-push 1000 s ago at load 15", here, end("pre-push", 1000, "15"), false, over("pre-push")},
-		{"pre-push 1000 s ago at load 1", here, end("pre-push", 1000, "1"), false, over("pre-push")},
-		{"pre-commit 1000 s ago with no load", here, end("pre-commit", 1000, ""), false, over("pre-commit")},
-		{"pre-push 1000 s ago with no load", here, end("pre-push", 1000, ""), false, over("pre-push")},
-		{"release 1000 s ago at load 99", here, end("release", 1000, "99"), false, over("release")},
-		{"release 1000 s ago with no load", here, end("release", 1000, ""), false, over("release")},
-		{"pre-push 600 s from now at load 16", here, end("pre-push", -600, "16"), false, `(?m)^hatch budget: pre-push-budget: --since [0-9]+ is [0-9]+ s after now`},
-		{"pre-push 600 s from now with no load", here, end("pre-push", -600, ""), false, `(?m)^hatch budget: pre-push-budget: --since [0-9]+ is [0-9]+ s after now`},
-		{"pre-push with no start", here, []string{"end", "TIER=pre-push", "START=", "LOAD="}, false, ``},
-		{"pre-push with a start not a number", here, []string{"end", "TIER=pre-push", "START=1795029899.5", "LOAD="}, false, ``},
-		{"pre-push 1000 s ago with its budget given twice", twice, end("pre-push", 1000, ""), false, `(?m)^hatch budget: gate/budgets.yaml has no single limit for pre-push-budget\r?$`},
-		{"a tier no tier is", here, end("pre-pushed", 1000, ""), false, `(?m)^budget: TIER is 'pre-pushed', and wants pre-commit, pre-push or release\r?$`},
-		{"pre-push 1000 s ago on a host the budgets do not name", elsewhere, end("pre-push", 1000, ""), true, `(?m)^pre-push took [0-9]+ s; no budget for this kind of host \(`},
+		{"pre-push members within the CPU limit pass", r.here, "", []string{"pre-push"}, true, cpuWithin},
+		{"pre-push members over the CPU limit fail", cpuZero, "", []string{"pre-push"}, false, `(?m)^hatch budget: pre-push is over its CPU budget`},
+		{"pre-push members that fail fail the tier", r.here, "false", []string{"pre-push"}, false, failed},
+		{"pre-push with no CPU row is refused", noCPU, "", []string{"pre-push"}, false, `(?m)^hatch budget: .*has no single CPU limit for pre-push`},
+		{"pre-push with its CPU limit given twice is refused", cpuTwice, "", []string{"pre-push"}, false, `(?m)^hatch budget: .*has no single CPU limit for pre-push`},
+		{"pre-push 1000 s ago at load 1 passes on its CPU time", r.here, "", end("pre-push", 1000, "1"), true, pastFew},
+		{"pre-push 1000 s ago at load 16 passes on its CPU time", r.here, "", end("pre-push", 1000, "16"), true, pastFew},
+		{"pre-push 1000 s ago with no load passes on its CPU time", r.here, "", end("pre-push", 1000, ""), true, pastFew},
+		{"pre-push 1000 s ago over its CPU limit fails at load 16", cpuZero, "", end("pre-push", 1000, "16"), false, `(?m)^hatch budget: pre-push is over its CPU budget`},
+		{"pre-push 600 s from now at load 16", r.here, "", end("pre-push", -600, "16"), false, after},
+		{"pre-push 600 s from now with no load", r.here, "", end("pre-push", -600, ""), false, after},
+		{"pre-push with no start", r.here, "", []string{"end", "TIER=pre-push", "START=", "LOAD="}, false, ``},
+		{"pre-push with a start not a number", r.here, "", []string{"end", "TIER=pre-push", "START=1795029899.5", "LOAD="}, false, ``},
+		{"pre-push with its wall budget given twice", twice, "", []string{"pre-push"}, false, `(?m)^hatch budget: gate/budgets.yaml has no single limit for pre-push\r?$`},
+		{"pre-push on a host with no row, members that pass", r.elsewhere, "", []string{"pre-push"}, true, noRow},
+		{"pre-push on a host with no row, members that fail fail the tier", r.elsewhere, "false", []string{"pre-push"}, false, failed},
+		{"release from its own start", r.here, "", []string{"release"}, true, within("release")},
+		{"pre-commit 1000 s ago at load 16", r.here, "", end("pre-commit", 1000, "16"), true, forgiven("pre-commit")},
+		{"pre-commit 1000 s ago at load 15", r.here, "", end("pre-commit", 1000, "15"), false, over("pre-commit")},
+		{"pre-commit 1000 s ago at load 1", r.here, "", end("pre-commit", 1000, "1"), false, over("pre-commit")},
+		{"pre-commit 1000 s ago with no load", r.here, "", end("pre-commit", 1000, ""), false, over("pre-commit")},
+		{"release 1000 s ago at load 99", r.here, "", end("release", 1000, "99"), false, over("release")},
+		{"release 1000 s ago with no load", r.here, "", end("release", 1000, ""), false, over("release")},
+		{"pre-commit 600 s from now at load 16", r.here, "", end("pre-commit", -600, "16"), false, `(?m)^hatch budget: pre-commit-budget: --since [0-9]+ is [0-9]+ s after now`},
+		{"pre-commit with a start not a number", r.here, "", []string{"end", "TIER=pre-commit", "START=1795029899.5", "LOAD="}, false, ``},
+		{"a tier no tier is", r.here, "", end("pre-pushed", 1000, ""), false, `(?m)^budget: TIER is 'pre-pushed', and wants pre-commit, pre-push or release\r?$`},
+		{"pre-commit 1000 s ago on a host the budgets do not name", r.elsewhere, "", end("pre-commit", 1000, ""), true, `(?m)^pre-commit took [0-9]+ s; no budget for this kind of host \([a-z0-9]+-[a-z0-9]+\), so none applies\r?$`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			out, err := run(t, folder(t, c.budgets), c.args)
+			out, err := r.run(t, r.folder(t, c.budgets, c.members), c.args)
 			switch {
 			case c.pass && err != nil:
 				t.Fatalf("task %s: %v, and want it to pass:\n%s", strings.Join(c.args, " "), err, out)
@@ -792,12 +786,10 @@ func TestTheBudgetHoldsEachTier(t *testing.T) {
 				t.Fatalf("task %s: passed, and want it to fail:\n%s", strings.Join(c.args, " "), out)
 			case !regexp.MustCompile(c.want).Match(out):
 				t.Fatalf("task %s: %v, and did not say %s:\n%s", strings.Join(c.args, " "), err, c.want, out)
-			case !c.pass && bytes.Contains(out, []byte("forgives it")):
-				t.Fatalf("task %s: failed, and said the load's line:\n%s", strings.Join(c.args, " "), out)
-			case c.want == within("pre-push") || c.want == within("release"):
-				if bytes.Contains(out, []byte("forgives it")) {
-					t.Fatalf("task %s: within its budget, and said a relief's line:\n%s", strings.Join(c.args, " "), out)
-				}
+			case (!c.pass || strings.HasPrefix(c.name, "pre-push")) && bytes.Contains(out, []byte("forgives it")):
+				t.Fatalf("task %s: said the load's line, which no failure and no pre-push says:\n%s", strings.Join(c.args, " "), out)
+			case c.want == within("release") && bytes.Contains(out, []byte("forgives it")):
+				t.Fatalf("task %s: within its budget, and said a relief's line:\n%s", strings.Join(c.args, " "), out)
 			}
 		})
 	}
@@ -807,20 +799,20 @@ func TestTheBudgetHoldsEachTier(t *testing.T) {
 	t.Run("an environment that names the measures", func(t *testing.T) {
 		t.Parallel()
 		late := strconv.FormatInt(time.Now().Unix()+600, 10)
-		out, err := runAsCaller(t, bin, folder(t, here), "pre-push", "START="+late, "LOAD=1234.5", "TIER=release", "TASK=release", "NOW=0")
+		out, err := runAsCaller(t, r.bin, r.folder(t, r.here, ""), "pre-push", "START="+late, "LOAD=1234.5", "TIER=release", "TASK=release", "NOW=0")
 		if err != nil {
 			t.Fatalf("pre-push, START, LOAD and TIER from its caller: %v:\n%s", err, out)
 		}
-		if !regexp.MustCompile(within("pre-push")).Match(out) || bytes.Contains(out, []byte("1234.5")) {
+		if !regexp.MustCompile(cpuWithin).Match(out) || bytes.Contains(out, []byte("1234.5")) {
 			t.Fatalf("pre-push, START, LOAD and TIER from its caller, did not keep what it measured:\n%s", out)
 		}
 	})
 
 	// A release whose caller names pre-push is held as a release: were the tier the caller's to
-	// name, a release past its budget would pass at a load above 15, as a pre-push does.
+	// name, a release would be judged by a CPU time that runs no release member.
 	t.Run("a release whose caller names pre-push", func(t *testing.T) {
 		t.Parallel()
-		out, err := runAsCaller(t, bin, folder(t, here), "release", "TIER=pre-push", "TASK=pre-push")
+		out, err := runAsCaller(t, r.bin, r.folder(t, r.here, ""), "release", "TIER=pre-push", "TASK=pre-push")
 		if err != nil {
 			t.Fatalf("release, TIER and TASK naming pre-push: %v:\n%s", err, out)
 		}
@@ -833,7 +825,7 @@ func TestTheBudgetHoldsEachTier(t *testing.T) {
 	// neither leaves a file.
 	t.Run("two runs of one tier at once", func(t *testing.T) {
 		t.Parallel()
-		dir := folder(t, here)
+		dir := r.folder(t, r.here, "")
 		files := func() []string {
 			var names []string
 			if err := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
@@ -851,12 +843,12 @@ func TestTheBudgetHoldsEachTier(t *testing.T) {
 			pass bool
 			want string
 		}{
-			{[]string{"pre-push"}, true, within("pre-push")},
-			{end("pre-push", 1000, "16"), true, forgiven("pre-push")},
-			{end("pre-push", 1000, "15"), false, over("pre-push")},
+			{[]string{"pre-push"}, true, cpuWithin},
+			{end("pre-push", 1000, "16"), true, pastFew},
+			{end("pre-push", -600, ""), false, after},
 		} {
 			wg.Go(func() {
-				out, err := run(t, dir, c.args)
+				out, err := r.run(t, dir, c.args)
 				if (err == nil) != c.pass || !regexp.MustCompile(c.want).Match(out) {
 					t.Errorf("task %s, beside two other runs of pre-push: %v, and want it to say %s:\n%s", strings.Join(c.args, " "), err, c.want, out)
 				}
@@ -868,6 +860,174 @@ func TestTheBudgetHoldsEachTier(t *testing.T) {
 		}
 	})
 }
+
+// cpuWithin is the line hatch budget --cpu says for a pre-push within its CPU limit.
+const cpuWithin = `(?m)^budget: pre-push used [0-9]+\.[0-9] s of CPU of [0-9]+ s\r?$`
+
+// TestThePushTiersWallTimeIsOnlyAHangGuard runs pre-push as TestTheBudgetHoldsEachTier does, with
+// a wall budget of a few seconds: members that run past it and within their CPU limit pass,
+// saying so, and members still running at 10 times it are killed and fail as hung. Its rows wait
+// out their wall budgets, so it runs over a second, and it guards no fail-open on its own (the
+// members' run handed to hatch is what TestTheBudgetHoldsEachTier holds), so pre-push leaves it to
+// release, by test's skip.
+//
+// What it costs when this fails: a push on a loaded machine fails by its wall time, as before
+// pre-push was judged by its CPU time; or a push that hangs never ends.
+func TestThePushTiersWallTimeIsOnlyAHangGuard(t *testing.T) {
+	t.Parallel()
+	r := newBudgetRig(t)
+	const wall = "\npre-push-budget: 10\n"
+	if strings.Count(r.here, wall) != 1 {
+		t.Fatalf("gate/budgets.yaml has not one line %q:\n%s", strings.TrimSpace(wall), r.here)
+	}
+	for _, c := range []struct {
+		name    string
+		wall    int
+		members string
+		pass    bool
+		want    string
+	}{
+		// 3 s of wall budget, so a loaded machine has 30 s before the guard.
+		{"members over the wall budget pass on their CPU time", 3, "sleep 4", true, `(?m)^budget: pre-push is over its wall limit of 3 s, and passes or fails on its CPU time alone`},
+		{"members still running at 10 times the wall budget fail as hung", 1, "sleep 30", false, `(?m)^hatch budget: pre-push: hung: still running at 10 ?s`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			budgets := strings.Replace(r.here, wall, "\npre-push-budget: "+strconv.Itoa(c.wall)+"\n", 1)
+			out, err := r.run(t, r.folder(t, budgets, c.members), []string{"pre-push"})
+			switch {
+			case c.pass && err != nil:
+				t.Fatalf("task pre-push: %v, and want it to pass:\n%s", err, out)
+			case !c.pass && err == nil:
+				t.Fatalf("task pre-push passed, and want it to fail:\n%s", out)
+			case !regexp.MustCompile(c.want).Match(out):
+				t.Fatalf("task pre-push: %v, and did not say %s:\n%s", err, c.want, out)
+			}
+		})
+	}
+}
+
+// TestThePushCPULimitIsTwiceItsFloor holds gate/budgets.yaml's pre-push-cpu-limit to twice its
+// pre-push-cpu-floor, the least CPU time of three cold runs, rounded up to the whole seconds
+// hatch reads a limit in.
+//
+// What it costs when this fails: the limit drifts from what was measured, and a push far slower
+// than the floor passes, or one as fast fails.
+func TestThePushCPULimitIsTwiceItsFloor(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("gate", "budgets.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := map[string][]string{}
+	for line := range strings.Lines(string(raw)) {
+		if key, value, ok := strings.Cut(strings.TrimSpace(line), ": "); ok && !strings.HasPrefix(key, "#") {
+			rows[key] = append(rows[key], value)
+		}
+	}
+	floor, limit := rows["pre-push-cpu-floor"], rows["pre-push-cpu-limit"]
+	if len(floor) != 1 || len(limit) != 1 {
+		t.Fatalf("gate/budgets.yaml has pre-push-cpu-floor %q and pre-push-cpu-limit %q, and want one of each", floor, limit)
+	}
+	f, err := strconv.ParseFloat(floor[0], 64)
+	if err != nil || f <= 0 {
+		t.Fatalf("gate/budgets.yaml: pre-push-cpu-floor is %q, and want a number of seconds above 0", floor[0])
+	}
+	if want := strconv.FormatFloat(math.Ceil(2*f), 'f', -1, 64); limit[0] != want {
+		t.Errorf("gate/budgets.yaml: pre-push-cpu-limit is %q, and want %s, twice pre-push-cpu-floor rounded up to whole seconds", limit[0], want)
+	}
+}
+
+// budgetRig is what a test that runs Taskfile.yml's budget task through budgetWrapper's Taskfile
+// needs: the wrapper, the budgets with this host's line and with one no host has, go.mod's go
+// line, and the go-task taskBin built. Making one warms the tools pre-push's budget runs.
+type budgetRig struct {
+	wrapper, here, elsewhere, goLine, bin string
+}
+
+func newBudgetRig(t *testing.T) budgetRig {
+	t.Helper()
+	wrapper, here, elsewhere, goLine := budgetWrapper(t)
+	warmPushTools(t)
+	return budgetRig{wrapper, here, elsewhere, goLine, taskBin(t)}
+}
+
+// folder makes a folder with the wrapper, its pre-push-members the one command members (true if
+// none), the budgets given, a go.mod, and hatch's and go-task's modfiles.
+func (r budgetRig) folder(t *testing.T, budgets, members string) string {
+	t.Helper()
+	if members == "" {
+		members = "true"
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "gate"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "tools"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"Taskfile.yml":                        strings.Replace(r.wrapper, membersMark, members, 1),
+		filepath.Join("gate", "budgets.yaml"): budgets,
+		"go.mod":                              "module example.invalid/budget\n\n" + r.goLine + "\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tool := range []string{"hatch", "task"} {
+		for _, ext := range []string{".mod", ".sum"} {
+			name := filepath.Join("tools", tool+ext)
+			if err := copyFile(name, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return dir
+}
+
+// run runs the wrapper with args in dir, GITHUB_ACTIONS taken out of its environment and env put
+// in.
+func (r budgetRig) run(t *testing.T, dir string, args []string, env ...string) ([]byte, error) {
+	t.Helper()
+	cmd := goTask(t, r.bin, args...)
+	cmd.Dir = dir
+	isolate(cmd)
+	cmd.Env = append(slices.DeleteFunc(cmd.Env, func(kv string) bool { return strings.HasPrefix(kv, "GITHUB_ACTIONS=") }), env...)
+	return cmd.CombinedOutput()
+}
+
+// pushTools is hatch and go-task built once as pre-push's budget runs them, go tool's build of
+// each, which Go caches apart from taskBin's go install. A run of pre-push whose budget builds
+// go-task counts that build in its CPU time, and on a cold build cache, with tests building it at
+// once, runs past a hang guard of 10 s.
+var pushTools struct { //nolint:gochecknoglobals // the test binary builds pre-push's tools once, for every test that runs pre-push
+	once sync.Once
+	err  error
+}
+
+// warmPushTools builds pushTools once, in the test's own environment, as the runs of pre-push
+// have it, and fails the test where a build fails.
+func warmPushTools(t *testing.T) {
+	t.Helper()
+	pushTools.once.Do(func() {
+		for _, tool := range []string{"hatch", "task"} {
+			cmd := exec.CommandContext(t.Context(), "go", "tool", "-modfile=tools/"+tool+".mod", "-n", tool) //nolint:gosec // G204: go tool and a name spelled out here; no shell reads them
+			isolate(cmd)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				pushTools.err = fmt.Errorf("go tool -modfile=tools/%s.mod -n %s: %w: %s", tool, tool, err, out)
+				return
+			}
+		}
+	})
+	if pushTools.err != nil {
+		t.Fatal(pushTools.err)
+	}
+}
+
+// membersMark stands in budgetWrapper's Taskfile for the one command of its pre-push-members,
+// which budgetRig.folder puts in.
+const membersMark = "@MEMBERS@"
 
 // runAsCaller runs go-task's task in dir with each of caller's variables both on its command line
 // and in its environment, GITHUB_ACTIONS taken out of it.
@@ -881,8 +1041,9 @@ func runAsCaller(t *testing.T, bin, dir, task string, caller ...string) ([]byte,
 }
 
 // budgetWrapper is TestTheBudgetHoldsEachTier's Taskfile, which includes this one: its end calls
-// budget with the TIER, START and LOAD given, and its pre-push and release are those tiers' own
-// vars and budget calls, read from Taskfile.yml, with no member between. It says too
+// budget with the TIER, START and LOAD given, its pre-push and release are those tiers' own vars
+// and budget calls, read from Taskfile.yml, with no member between, and its pre-push-members, which
+// pre-push's budget runs, is the one command membersMark, quoted. It says too
 // gate/budgets.yaml with its host set to the one the test runs on, and to one no host is, and
 // go.mod's go line.
 func budgetWrapper(t *testing.T) (wrapper, here, elsewhere, goLine string) {
@@ -922,7 +1083,8 @@ func budgetWrapper(t *testing.T) (wrapper, here, elsewhere, goLine string) {
 		t.Fatal(err)
 	}
 	wrapper = "version: '3'\nvars:" + hatch + "includes:\n  lib:\n    taskfile: '" + filepath.ToSlash(abs) + "'\n    dir: .\ntasks:\n" +
-		"  end:\n    cmds:\n      - task: lib:budget\n        vars: {TIER: '{{.TIER}}', START: '{{.START}}', LOAD: '{{.LOAD}}'}\n"
+		"  end:\n    cmds:\n      - task: lib:budget\n        vars: {TIER: '{{.TIER}}', START: '{{.START}}', LOAD: '{{.LOAD}}'}\n" +
+		"  pre-push-members:\n    cmds:\n      - cmd: '" + membersMark + "'\n"
 	for _, tier := range []string{"pre-push", "release"} {
 		block := taskBlock(t, file, tier)
 		_, vars, _ := strings.Cut(block, "\n    vars:\n")
@@ -936,8 +1098,10 @@ func budgetWrapper(t *testing.T) (wrapper, here, elsewhere, goLine string) {
 	return wrapper, here, elsewhere, goLine
 }
 
-// TestEachTierEndsInItsBudget holds each tier to its shape: its members, then budget, its last
-// command, given the tier's own name; release checks its VERSION first.
+// TestEachTierEndsInItsBudget holds each tier to its shape: pre-commit and release are their
+// members, then budget, their last command; pre-push is budget alone, which runs its members under
+// hatch budget --cpu (TestTheBudgetHoldsEachTier); each gives budget the tier's own name; release
+// checks its VERSION first.
 //
 // What it costs when this fails: a tier's member runs outside its time, or a tier is held to
 // another's budget, and a tier past its budget passes.
@@ -973,8 +1137,12 @@ func TestEachTierEndsInItsBudget(t *testing.T) {
 			// and then clears its stamps.
 			cmds = strings.TrimPrefix(cmds, " - Task: version\n - rm -rf .task/pass\n")
 		}
-		if cmds != " - Task: "+tier+"-members\n - Task: budget\n" && cmds != " - Task: "+tier+"-members\n - Task: budget\n\n" {
-			t.Errorf("%s is not its members and then budget:\n%q", tier, cmds)
+		want := " - Task: " + tier + "-members\n - Task: budget\n"
+		if tier == "pre-push" {
+			want = " - Task: budget\n"
+		}
+		if cmds != want && cmds != want+"\n" {
+			t.Errorf("%s's commands are %q, and want %q", tier, cmds, want)
 		}
 		if block := taskBlock(t, string(raw), tier); !strings.Contains(block, "\n      - task: budget\n        vars: {TIER: "+tier+", START: '{{.START}}', ") {
 			t.Errorf("%s does not give budget its own name and its START:\n%s", tier, block)

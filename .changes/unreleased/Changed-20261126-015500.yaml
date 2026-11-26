@@ -1,0 +1,3 @@
+kind: Changed
+body: 'The pre-push tier is judged by the CPU time its tree uses, user plus system, through hatch budget --cpu: on macOS arm64 it fails over 275 s, twice the least of three runs from a fresh clone, each after go clean -testcache (152.6, 137.1 and 139.0 s). CPU time is the same on a quiet machine and a loaded one, so the load no longer excuses a push. Its wall budget of 10 s is only a hang guard: a push past it and within its CPU limit passes, saying so, and one still running at 100 s is killed and fails as hung. The commit and release tiers keep their wall-time budgets.'
+time: 2026-11-26T01:55:00.000000+01:00

@@ -3,9 +3,11 @@
 #
 # The budget is a ceiling: commit 2 s, push 10 s, release 15 s on a darwin-arm64 host, and 60 s
 # for the release tier on a Linux or Windows amd64 machine (GITHUB_ACTIONS unset); it stands
-# over any rule of floor times a factor, pre-push's too. A tier past its budget
-# on that kind of host fails, but a pre-commit or pre-push that started at a 1-minute load above
-# 15 passes, saying so. On any other kind of host,
+# over any rule of floor times a factor. A tier past its budget
+# on that kind of host fails, but a pre-commit that started at a 1-minute load above
+# 15 passes, saying so. pre-push is judged by its CPU time, held to pre-push-cpu-limit, and its
+# 10 s is only a hang guard: a push past it passes on its CPU time, and one still running at
+# 100 s is killed and fails as hung. On any other kind of host,
 # and on a hosted runner (GITHUB_ACTIONS set), no budget applies and the time is printed; a
 # hosted run is held by its job's timeout.
 #
@@ -29,9 +31,15 @@ pre-commit-budget: 2
 # own (the first two are the budget's whole seconds): under the budget, where on 20 Nov it took
 # 12.80, 12.94 and 12.34 s. pre-push's race run now exits without the race detector's pause, and
 # listen's two longest race rows run four racers at once, every round kept.
-# The 10 s budget stands, and a push over it is a speed bug.
+# The 10 s budget stands as the hang guard.
 pre-push-floor: 4.64
 pre-push-budget: 10
+# pre-push's CPU time, user plus system, of its members' tree, as hatch budget --cpu measures it:
+# the least of 152.6, 137.1 and 139.0 s on 26 Nov 2026, at a start load of 20.0, 21.8 and 25.6,
+# each a clone's first run, after go clean -testcache, in a clone of its own (257 tests each). The
+# limit is twice the floor, rounded up to whole seconds (TestThePushCPULimitIsTwiceItsFloor).
+pre-push-cpu-floor: 137.1
+pre-push-cpu-limit: 275
 # The least of 8.54, 8.33 and 8.35 s on 17 Nov 2026, at a start load of 29 to 36.
 release-floor: 8.33
 release-budget: 15
