@@ -33,8 +33,10 @@
 # api and gorelease (the last tag), changelog and size. release removes every stamp
 # first, so nothing in it skips, vuln among them, whose database moves.
 #
-# Each tier holds its time to its budget in gate/budgets.yaml with hatch
-# budget, its last step: budget says how. The
+# pre-commit and release hold their time to their budget in gate/budgets.yaml
+# with hatch budget, their last step; pre-push's one step, budget, runs its
+# members under hatch budget --cpu and holds their CPU time to its CPU limit
+# there: budget says how. The
 # tests are judged by hatch tests, and a test that fails or skips, or a run with
 # no test, is red.
 version: '3'
@@ -86,18 +88,19 @@ tasks:
     internal: true
     deps: [fmt, tidy, build, vet, second, contract, secrets]
 
+  # pre-push's one command is budget, which runs its members under hatch budget --cpu
+  # (budget says how). pre-push-members is not internal, so the run of task hatch is handed can
+  # name it; it has no desc, so task --list leaves it out.
   pre-push:
-    desc: The tier the pre-push hook runs, its members run together, then held to its budget.
+    desc: The tier the pre-push hook runs, its members run together and held to their CPU limit.
     vars:
       LOAD: {sh: '{{.HATCH}} budget --load --window 1 2>/dev/null || true'}
       START: '{{now.Unix}}'
     cmds:
-      - task: pre-push-members
       - task: budget
         vars: {TIER: pre-push, START: '{{.START}}', LOAD: '{{.LOAD}}'}
 
   pre-push-members:
-    internal: true
     deps: [fmt, tidy, secrets, systems, test, lint, api, vuln, licenses]
 
   release:
@@ -189,7 +192,7 @@ tasks:
   # budget holds a tier to its budget in gate/budgets.yaml with hatch budget.
   # hatch holds no policy, so each value is named here: the row's shape,
   # which row a kind of host takes, the load that forgives an overrun and the words.
-  # A pre-commit or pre-push past its budget passes when the 1-minute load read
+  # A pre-commit past its budget passes when the 1-minute load read
   # before it was above 15, saying so, and fails at 15 or
   # below or with no load read; a release past its budget fails. The
   # tier reads that load (hatch budget --load, none on Windows) and then its start
@@ -198,8 +201,16 @@ tasks:
   # line (START=0 or LOAD=16 before a git push, TIER=pre-push after release) sets
   # none of them, as go-task takes a task's own var and a call's over both.
   #
-  # pre-push has no relief of its own: its budget is 10 s, and
-  # an overrun passes only at a load above 15. A warm push over 10 s is a speed bug.
+  # pre-push is judged by its CPU time, not its wall time: budget runs its members,
+  # `task pre-push-members`, under hatch budget --cpu, in a tree of hatch's own, and holds the
+  # user plus system time of that tree to pre-push-cpu-limit. CPU time is the same on a quiet
+  # machine and a loaded one, so no load forgives a push. pre-push-budget, its wall budget, is
+  # only a hang guard: a push past it and within its CPU limit passes, saying so, and hatch kills
+  # one still running at 10 times it, which fails as hung. A budgets file with no CPU row for
+  # pre-push is refused. On a kind of host the file does not name, budget runs the members and
+  # prints the time, and members that fail fail the tier. The members' run of task has
+  # --color=false: go-task colours its output where CI is set, and a colour code it leaves open
+  # would start the line hatch writes after it.
   budget:
     internal: true
     silent: true
@@ -216,17 +227,28 @@ tasks:
           elif [ "$tier" = release ] && [ -z "${GITHUB_ACTIONS:-}" ] && { [ "$here" = linux-amd64 ] || [ "$here" = windows-amd64 ]; }; then
             row=release-budget-session
           else
-            echo "$tier took $(( {{now.Unix}} - start )) s; no budget for this kind of host ($here), so none applies"
+            if [ "$tier" = pre-push ]; then
+              go tool -modfile=tools/task.mod task --color=false pre-push-members || exit 1
+            fi
+            echo "$tier took $(( $(date +%s) - start )) s; no budget for this kind of host ($here), so none applies"
             exit 0
+          fi
+          if [ "$tier" = pre-push ]; then
+            set -- --budgets gate/budgets.yaml --row '^(?P<id>[a-z-]+)-budget: *(?P<limit>[0-9]+) *$' --tier pre-push --since "$start" --window 1 --noun "the pre-push"
+            if [ -n "$load" ]; then set -- "$@" --load-before "$load"; fi
+            {{.HATCH}} budget "$@" --advice "gate/budgets.yaml has pre-push's CPU floor beside its CPU limit" --cpu --cpu-row '^(?P<id>[a-z-]+)-cpu-limit: *(?P<limit>[0-9]+) *$' -- go tool -modfile=tools/task.mod task --color=false pre-push-members
+            exit
           fi
           set -- --budgets gate/budgets.yaml --row '^(?P<id>[a-z-]+): *(?P<limit>[0-9]+) *$' --tier "$row" --since "$start"
           case "$tier" in
-            pre-commit|pre-push)
+            pre-commit)
               set -- "$@" --window 1 --limit 15 --loaded-when before --noun "the $tier" --excused "the load forgives it"
               if [ -n "$load" ]; then set -- "$@" --load-before "$load"; fi ;;
           esac
           {{.HATCH}} budget "$@" --advice "gate/budgets.yaml has the tier's floor beside its budget"
-        timeout: 1m
+        # pre-push's members run inside this command, and hatch kills them as hung at 10 times
+        # pre-push's wall budget; this timeout stands over that, and over a host with no row.
+        timeout: 10m
 
   fmt:
     desc: gofmt changes nothing.
@@ -309,7 +331,7 @@ tasks:
       - mkdir -p .task/pass && touch .task/pass/systems
 
   test:
-    desc: "The race tests, on this system, through Go's test cache: a package whose inputs did not change is not run again, judged by hatch tests. Not the one release runs alone (release-tests), nor the one over 1 s that guards no fail-open, which release's test-release runs. On Windows, and in test-release, each test binary starts through internal/cmd/testexec, which go test caches nothing behind."
+    desc: "The race tests, on this system, through Go's test cache: a package whose inputs did not change is not run again, judged by hatch tests. Not the one release runs alone (release-tests), nor the ones over 1 s that guard no fail-open, which release's test-release runs. On Windows, and in test-release, each test binary starts through internal/cmd/testexec, which go test caches nothing behind."
     # TIER picks the script's flags and skip. It is the task's own var, which
     # go-task takes over a variable of the caller's environment and over one on
     # the command line alike; {{.TASK}} is not, as `task release TASK=test`
@@ -326,8 +348,10 @@ tasks:
       # replays its tests' events in go test -json, so hatch counts them as run.
       #
       # Both skip the test over 2 s that checks release's own input, which runs in
-      # release alone (release-tests). test also skips the one test
-      # over 1 s that guards no fail-open: TestWarmBuildsAndRunsNothing.
+      # release alone (release-tests). test also skips the tests
+      # over 1 s that guard no fail-open: TestWarmBuildsAndRunsNothing, and
+      # TestThePushTiersWallTimeIsOnlyAHangGuard, whose fail-open break (hatch handed
+      # a command that runs no member) also turns TestTheBudgetHoldsEachTier red here.
       # A second was once skipped too, the failed member's kept output, which is now
       # TestATestMemberIsJudgedByHatchTests: it holds that a skip or a run with no
       # test is red, a fail-open guard, so pre-push runs it. The skip is named here,
@@ -371,7 +395,7 @@ tasks:
       # test-release runs every test again with the pause, so a race only the pause shows is
       # still red before a tag. A binary that found a race exits 66 in both.
       - cmd: &test-run |
-          {{if eq .TIER "release"}}flags='-count=1 -shuffle=on'; skip='^TestTheVersionCheckRefusesAnythingButOneTag$'; race=''{{else if eq .TIER "pre-push"}}flags=''; skip='^(TestTheVersionCheckRefusesAnythingButOneTag|TestWarmBuildsAndRunsNothing)$'; race='atexit_sleep_ms=0'{{else}}echo "test: TIER is '{{.TIER}}', and wants pre-push or release" >&2; exit 1{{end}}
+          {{if eq .TIER "release"}}flags='-count=1 -shuffle=on'; skip='^TestTheVersionCheckRefusesAnythingButOneTag$'; race=''{{else if eq .TIER "pre-push"}}flags=''; skip='^(TestTheVersionCheckRefusesAnythingButOneTag|TestWarmBuildsAndRunsNothing|TestThePushTiersWallTimeIsOnlyAHangGuard)$'; race='atexit_sleep_ms=0'{{else}}echo "test: TIER is '{{.TIER}}', and wants pre-push or release" >&2; exit 1{{end}}
           if [ -n "$race" ]; then GORACE="${GORACE:+$GORACE }$race"; export GORACE; fi
           {{if or (eq .TIER "release") (eq OS "windows")}}through=testexec{{else}}through=''{{end}}
           mkdir -p "{{toSlash .ROOT_DIR}}/build"
