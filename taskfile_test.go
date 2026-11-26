@@ -774,7 +774,7 @@ func TestTheBudgetHoldsEachTier(t *testing.T) {
 		{"pre-commit 600 s from now at load 16", r.here, "", end("pre-commit", -600, "16"), false, `(?m)^hatch budget: pre-commit-budget: --since [0-9]+ is [0-9]+ s after now`},
 		{"pre-commit with a start not a number", r.here, "", []string{"end", "TIER=pre-commit", "START=1795029899.5", "LOAD="}, false, ``},
 		{"a tier no tier is", r.here, "", end("pre-pushed", 1000, ""), false, `(?m)^budget: TIER is 'pre-pushed', and wants pre-commit, pre-push or release\r?$`},
-		{"release 1000 s ago on a host the budgets do not name", r.elsewhere, "", end("release", 1000, ""), true, `(?m)^release took [0-9]+ s; no budget for this kind of host \([a-z0-9]+-[a-z0-9]+\), so none applies\r?$`},
+		{"pre-commit 1000 s ago on a host the budgets do not name", r.elsewhere, "", end("pre-commit", 1000, ""), true, `(?m)^pre-commit took [0-9]+ s; no budget for this kind of host \([a-z0-9]+-[a-z0-9]+\), so none applies\r?$`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
